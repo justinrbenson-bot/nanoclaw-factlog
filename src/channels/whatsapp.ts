@@ -571,6 +571,13 @@ registerChannelAdapter('whatsapp', {
             const inbound: InboundMessage = {
               id: msg.key.id || `wa-${Date.now()}`,
               kind: 'chat',
+              // DMs are addressed to the bot by definition. Mark them as
+              // platform-confirmed mentions so the router treats them like
+              // chat-sdk-bridge's onDirectMessage path — auto-creating an
+              // approval-required messaging_group when the chat is unknown,
+              // instead of silently dropping at router.ts:184.
+              isMention: !isGroup ? true : undefined,
+              isGroup,
               content: {
                 text: content,
                 sender,
