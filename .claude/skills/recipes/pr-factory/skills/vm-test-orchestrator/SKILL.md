@@ -38,7 +38,7 @@ Each step below is idempotent: if the file or line is already present, leave it 
 
 ## Apply
 
-All copy sources are under this component's folder:
+All copy sources are under this component's folder; run every command from the repo root:
 
 ```bash
 SKILL=.claude/skills/recipes/pr-factory/skills/vm-test-orchestrator

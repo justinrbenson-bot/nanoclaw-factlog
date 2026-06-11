@@ -44,14 +44,14 @@ The component SKILL.mds re-probe the subset each one depends on; this table is t
 
 Order is load-bearing: `slack-bots` patches the adapter `/add-slack` installs, `pr-factory-core` imports `slack-bots`' instance constants, and the three optional components register on seams owned by `pr-factory-core`. Apply each component by following its own SKILL.md.
 
-1. **`/add-slack`** (stock channel skill) — the worker bot. **Pin `@chat-adapter/slack@4.26.0`**, not the 4.27.0 in that skill's text: 4.27.0 pulls `chat@4.27.0` types that fail the build against core's `chat@^4.24.0` resolution.
+1. **`/add-slack`** (stock channel skill) — the worker bot. **Pin `@chat-adapter/slack@4.26.0`**, not the 4.27.0 in that skill's text: 4.27.0 pulls `chat@4.27.0` types that fail the build against core's `chat@^4.24.0` resolution. Replace that skill's install command with `pnpm install @chat-adapter/slack@4.26.0 --save-exact` — the exact pin matters; a caret range re-resolves to 4.27.0 and breaks the build later.
 2. **`skills/slack-bots`** — supervisor + tester Slack apps as named channel instances, sibling-echo suppression, the bot_id→instance fork-upgrade migration.
 3. **`skills/pr-factory-core`** — the engine. Inert until `GITHUB_WEBHOOK_SECRET` is set.
 4. **`skills/gh-action-approval`** *(optional)* — without it, `credentialed_gh` calls answer "component not installed".
 5. **`skills/vm-test-orchestrator`** *(optional)* — without it, approved test plans answer "no test orchestrator installed".
 6. **`skills/slack-canvas`** *(optional)* — without it, plans and reviews post as plain text + `.md` uploads.
 
-Finally copy in the recipe-owned files (idempotent, like every apply step):
+Finally copy in the recipe-owned files (idempotent, like every apply step; run from the repo root, like every command in this bundle):
 
 ```bash
 RECIPE=.claude/skills/recipes/pr-factory
