@@ -178,4 +178,30 @@ describe('orchestrator', () => {
     expect(text).not.toContain('Propose merge');
     expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(1);
   });
+
+  it('a second onVmReady for the same PR clears the prior timeout — no orphaned timer fires', async () => {
+    vi.useFakeTimers();
+    try {
+      // Two VM-ready events for the same PR. The fix clears the first timer
+      // before arming the second; without it the first timer is orphaned and
+      // still fires at +30min, posting a spurious "Test Timeout".
+      await callbacks.onVmReady(42, REPO, 'vm-a.example.test', '## Plan A');
+      await callbacks.onVmReady(42, REPO, 'vm-b.example.test', '## Plan B');
+
+      // Results arrive and clear the single live (second) timer.
+      await handleTestResults({ pr_number: 42, repo: REPO, verdict: 'PASS', content: 'all good' }, workerSession);
+
+      // Advance well past the 30-minute ceiling. A leaked first timer would
+      // fire handleTimeout here and append a timeout message.
+      await vi.advanceTimersByTimeAsync(31 * 60 * 1000);
+
+      const outbound = readRows(outboundDbPath('ag-worker', workerSession.id), 'messages_out');
+      const timeoutMsgs = outbound.filter((r) =>
+        (JSON.parse(r.content) as { text: string }).text.includes('Test Timeout'),
+      );
+      expect(timeoutMsgs).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

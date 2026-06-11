@@ -84,7 +84,12 @@ async function onVmReady(prNumber: number, repo: string, vmHost: string, planCon
     await wakeContainer(fresh);
   }
 
-  // Start 30-min timeout
+  // Start 30-min timeout. Clear any timer already armed for this PR first —
+  // a re-run (e.g. a second VM-ready for the same PR) would otherwise orphan
+  // the previous timer, which then fires against the wrong run and is never
+  // cleared. Keyed by prNumber (a factory instance serves one repo).
+  const prev = timeouts.get(prNumber);
+  if (prev) clearTimeout(prev);
   const timer = setTimeout(() => {
     handleTimeout(prNumber, repo).catch((err) => log.error('Timeout handler error', { prNumber, err }));
   }, TIMEOUT_MS);
