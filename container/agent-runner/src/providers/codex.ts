@@ -1,112 +1,106 @@
-/**
- * OpenAI Codex provider — wraps `codex app-server` via JSON-RPC.
- *
- * Unlike the (deprecated) @openai/codex-sdk approach, the app-server
- * protocol exposes proper session/stream semantics, native compaction, and
- * stable MCP config via ~/.codex/config.toml — which is the same mechanism
- * the standalone codex CLI uses, so the container and host share one
- * provider-integration story.
- *
- * Codex turns don't accept mid-turn input. Follow-up `push()` messages are
- * queued and drained after the current turn completes (same pattern as the
- * opencode provider — see poll-loop for why that's correct: the poll-loop
- * only pushes once it has new pending messages, and we only drain between
- * turns, so no message is dropped).
- */
 import fs from 'fs';
 import path from 'path';
 
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type {
+  AgentProvider,
+  AgentQuery,
+  McpServerConfig,
+  ProviderEvent,
+  ProviderExchange,
+  ProviderOptions,
+  QueryInput,
+} from './types.js';
+import { archiveProviderExchange } from './exchange-archive.js';
 import {
   type AppServer,
+  type CodexReasoningEffort,
   type JsonRpcNotification,
   STALE_THREAD_RE,
   attachCodexAutoApproval,
-  createCodexConfigOverrides,
   initializeCodexAppServer,
+  interruptCodexTurn,
   killCodexAppServer,
   spawnCodexAppServer,
   startCodexTurn,
   startOrResumeCodexThread,
-  writeCodexMcpConfigToml,
+  steerCodexTurn,
+  writeCodexConfigToml,
 } from './codex-app-server.js';
 
-/** Hard ceiling for a single turn. Guards against app-server wedging. */
-const TURN_TIMEOUT_MS = 5 * 60 * 1000;
+const TURN_TIMEOUT_MS = 10 * 60 * 1000;
+const SUPPORTED_EFFORTS = new Set<CodexReasoningEffort>(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
-// ── System-prompt assembly ──────────────────────────────────────────────────
-// Codex's app-server doesn't expand Claude Code's `@-import` syntax in
-// CLAUDE.md, and doesn't auto-load CLAUDE.local.md from the working dir the
-// way Claude Code does. Left alone, the agent sees only the raw import
-// directives as literal text and none of the composed content — no shared
-// CLAUDE.md, no module fragments, no per-group memory. We resolve both here
-// so Codex (and any other non-Claude provider) gets the same effective
-// system prompt the Claude provider gets natively.
-
-/**
- * Inline `@<path>` import directives (line-anchored) with the contents of
- * the referenced file, resolved relative to `baseDir`. Recurses so imports
- * within imported files expand too. Cycles and missing files are silently
- * dropped (replaced with empty text) rather than left as raw `@path` lines,
- * which would confuse the model.
- */
-export function resolveClaudeImports(content: string, baseDir: string, seen: Set<string> = new Set()): string {
-  return content.replace(/^@(\S+)\s*$/gm, (_match, importPath: string) => {
-    try {
-      const resolved = path.resolve(baseDir, importPath);
-      if (seen.has(resolved)) return '';
-      if (!fs.existsSync(resolved)) return '';
-      const nextSeen = new Set(seen);
-      nextSeen.add(resolved);
-      const imported = fs.readFileSync(resolved, 'utf-8');
-      return resolveClaudeImports(imported, path.dirname(resolved), nextSeen);
-    } catch {
-      return '';
-    }
-  });
+export interface CodexRuntimeDeps {
+  writeCodexConfigToml: typeof writeCodexConfigToml;
+  spawnCodexAppServer: typeof spawnCodexAppServer;
+  attachCodexAutoApproval: typeof attachCodexAutoApproval;
+  initializeCodexAppServer: typeof initializeCodexAppServer;
+  startOrResumeCodexThread: typeof startOrResumeCodexThread;
+  startCodexTurn: typeof startCodexTurn;
+  steerCodexTurn: typeof steerCodexTurn;
+  interruptCodexTurn: typeof interruptCodexTurn;
+  killCodexAppServer: typeof killCodexAppServer;
 }
 
-function readAgentAndGlobalClaudeMd(): string | undefined {
-  // Per-group CLAUDE.md is responsible for pulling in the global instructions
-  // if the group wants them (the default scaffold starts with
-  // `@./.claude-global.md` which resolveClaudeImports inlines). Appending
-  // `/workspace/global/CLAUDE.md` explicitly here would double-inline the
-  // global content for any non-main group, wasting context tokens and
-  // risking contradictory instructions. Groups that don't import global
-  // intentionally don't get it — same as Claude-backed agents.
-  const groupDir = '/workspace/agent';
-  const groupPath = `${groupDir}/CLAUDE.md`;
-  const localPath = `${groupDir}/CLAUDE.local.md`;
-  const parts: string[] = [];
+const defaultCodexRuntimeDeps: CodexRuntimeDeps = {
+  writeCodexConfigToml,
+  spawnCodexAppServer,
+  attachCodexAutoApproval,
+  initializeCodexAppServer,
+  startOrResumeCodexThread,
+  startCodexTurn,
+  steerCodexTurn,
+  interruptCodexTurn,
+  killCodexAppServer,
+};
 
-  if (fs.existsSync(groupPath)) {
-    parts.push(resolveClaudeImports(fs.readFileSync(groupPath, 'utf-8'), groupDir));
+function classifyError(message: string): string | undefined {
+  if (/auth|api key|unauthorized|login|credential/i.test(message)) return 'auth';
+  if (/quota|rate limit|insufficient|billing|credit/i.test(message)) return 'quota';
+  if (/sandbox|permission|denied/i.test(message)) return 'sandbox';
+  if (/thread|conversation|session/i.test(message)) return 'stale-session';
+  return undefined;
+}
+
+function normalizeEffort(effort: string | undefined): CodexReasoningEffort | undefined {
+  const normalized = effort?.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (!SUPPORTED_EFFORTS.has(normalized as CodexReasoningEffort)) {
+    throw new Error(`Unsupported Codex reasoning effort: ${effort}`);
   }
-  if (fs.existsSync(localPath)) {
-    parts.push(resolveClaudeImports(fs.readFileSync(localPath, 'utf-8'), groupDir));
-  }
-
-  return parts.length > 0 ? parts.join('\n\n---\n\n') : undefined;
+  return normalized as CodexReasoningEffort;
 }
-
-function composeBaseInstructions(promptAddendum: string | undefined): string | undefined {
-  const claudeMd = readAgentAndGlobalClaudeMd();
-  const pieces = [claudeMd, promptAddendum].filter((s): s is string => Boolean(s));
-  return pieces.length > 0 ? pieces.join('\n\n---\n\n') : undefined;
-}
-
-// ── Provider ────────────────────────────────────────────────────────────────
 
 export class CodexProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
+  // Codex has no native NanoClaw memory — opt in to the runner's persistent
+  // memory/ scaffold (see memory-scaffold.ts).
+  readonly usesMemoryScaffold = true;
+  // The app-server keeps history server-side; there is no on-disk transcript,
+  // so the provider persists each exchange itself into `conversations/`
+  // (see exchange-archive.ts). The poll-loop reports exchanges through this
+  // hook and does nothing else — archiving is payload code, not runner code.
+  onExchangeComplete(exchange: ProviderExchange): void {
+    archiveProviderExchange({
+      provider: 'codex',
+      prompt: exchange.prompt,
+      result: exchange.result,
+      continuation: exchange.continuation,
+      status: exchange.status,
+    });
+  }
 
-  private readonly mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
-  private readonly model: string;
+  private readonly mcpServers: Record<string, McpServerConfig>;
+  private readonly model?: string;
+  private readonly effort?: CodexReasoningEffort;
+  private readonly runtime: CodexRuntimeDeps;
 
-  constructor(options: ProviderOptions = {}) {
+  constructor(options: ProviderOptions = {}, runtime: CodexRuntimeDeps = defaultCodexRuntimeDeps) {
     this.mcpServers = options.mcpServers ?? {};
-    this.model = (options.env?.CODEX_MODEL as string | undefined) ?? 'gpt-5.4-mini';
+    this.model = options.model;
+    this.runtime = runtime;
+    this.effort = normalizeEffort(options.effort);
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -115,131 +109,155 @@ export class CodexProvider implements AgentProvider {
   }
 
   query(input: QueryInput): AgentQuery {
-    const pending: string[] = [];
+    const pending: string[] = [input.prompt];
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
-    const kick = (): void => {
+    let activeServer: AppServer | null = null;
+    let activeThreadId: string | null = null;
+    let activeTurnId: string | null = null;
+    let wakeActiveTurn: (() => void) | null = null;
+
+    const wake = (): void => {
       waiting?.();
+      waiting = null;
     };
 
-    pending.push(input.prompt);
+    const pushOrSteer = (message: string): void => {
+      if (activeServer && activeThreadId && activeTurnId) {
+        void this.runtime.steerCodexTurn(activeServer, activeThreadId, activeTurnId, message).catch(() => {
+          pending.push(message);
+          wake();
+        });
+        return;
+      }
+      pending.push(message);
+      wake();
+    };
 
     const self = this;
 
     async function* gen(): AsyncGenerator<ProviderEvent> {
-      // One app-server per query invocation. The poll-loop keeps a single
-      // query active per batch of pending messages and ends it on idle, so
-      // spawn-per-query matches that cadence naturally.
-      writeCodexMcpConfigToml(self.mcpServers);
-      const server = spawnCodexAppServer(createCodexConfigOverrides());
-      attachCodexAutoApproval(server);
+      self.runtime.writeCodexConfigToml(self.mcpServers, { model: self.model, effort: self.effort });
+      const server = self.runtime.spawnCodexAppServer();
+      activeServer = server;
+      self.runtime.attachCodexAutoApproval(server);
 
       let threadId: string | undefined = input.continuation;
       let initYielded = false;
 
       try {
-        await initializeCodexAppServer(server);
-
-        const threadParams = {
+        await self.runtime.initializeCodexAppServer(server);
+        threadId = await self.runtime.startOrResumeCodexThread(server, threadId, {
           model: self.model,
           cwd: input.cwd,
-          sandbox: 'danger-full-access',
-          approvalPolicy: 'never',
-          personality: 'friendly',
-          baseInstructions: composeBaseInstructions(input.systemContext?.instructions),
-        };
-
-        threadId = await startOrResumeCodexThread(server, threadId, threadParams);
+          baseInstructions: input.systemContext?.instructions,
+        });
+        activeThreadId = threadId;
 
         while (!aborted) {
           while (pending.length === 0 && !ended && !aborted) {
             await new Promise<void>((resolve) => {
               waiting = resolve;
             });
-            waiting = null;
           }
           if (aborted) return;
           if (pending.length === 0 && ended) return;
 
           const text = pending.shift()!;
-
-          // One turn = one channel of streaming events. Each notification
-          // from the app-server yields an `activity` first (so the
-          // poll-loop's idle timer stays honest) and then, where relevant,
-          // an init / result / progress event.
           yield* runOneTurn(
             server,
-            threadId!,
+            threadId,
             text,
             self.model,
+            self.effort,
             input.cwd,
+            (turnId) => {
+              activeTurnId = turnId;
+            },
+            () => {
+              activeTurnId = null;
+            },
             () => initYielded,
             () => {
               initYielded = true;
             },
+            () => aborted,
+            (waker) => {
+              wakeActiveTurn = waker;
+            },
+            self.runtime.startCodexTurn,
           );
         }
       } finally {
-        killCodexAppServer(server);
+        activeTurnId = null;
+        activeThreadId = null;
+        activeServer = null;
+        wakeActiveTurn = null;
+        self.runtime.killCodexAppServer(server);
       }
     }
 
     return {
-      push: (message: string) => {
-        pending.push(message);
-        kick();
-      },
+      push: pushOrSteer,
       end: () => {
         ended = true;
-        kick();
+        wake();
       },
       abort: () => {
         aborted = true;
-        kick();
+        if (activeServer && activeThreadId && activeTurnId) {
+          void this.runtime.interruptCodexTurn(activeServer, activeThreadId, activeTurnId).catch(() => {});
+        }
+        wakeActiveTurn?.();
+        wake();
       },
       events: gen(),
     };
   }
 }
 
-// ── Per-turn event pump ─────────────────────────────────────────────────────
-// Pulled out because the gen() loop above reads cleaner with it extracted,
-// and because it's a natural seam for future unit tests that drive it with
-// a fake notification stream.
-
 async function* runOneTurn(
   server: AppServer,
   threadId: string,
   inputText: string,
-  model: string,
+  model: string | undefined,
+  effort: string | undefined,
   cwd: string,
+  setActiveTurn: (turnId: string) => void,
+  clearActiveTurn: () => void,
   hasInit: () => boolean,
   markInit: () => void,
+  isAborted: () => boolean,
+  setAbortWaker: (waker: (() => void) | null) => void,
+  startTurn: typeof startCodexTurn,
 ): AsyncGenerator<ProviderEvent> {
-  // Mutable refs via object properties — TS can't track closure assignments
-  // for narrowing, but property access keeps the declared type visible.
-  const turnState: { error: Error | null } = { error: null };
+  const state: { error: Error | null } = { error: null };
   let resultText = '';
   let turnDone = false;
+  let turnId: string | null = null;
 
-  // Buffered event queue so we can `yield` across the async notification
-  // callback. Each notification pushes zero or more ProviderEvents; the
-  // generator drains the buffer.
+  // A finished turn can no longer absorb steered input: codex's turn/steer
+  // against a completed turn resolves as a no-op, so a follow-up routed there
+  // is lost silently. Clear the active-turn marker the moment the turn ends —
+  // before the generator drains and tears down in its `finally` — so
+  // pushOrSteer queues any racing follow-up into a fresh turn instead.
+  const finishTurn = (): void => {
+    turnDone = true;
+    clearActiveTurn();
+  };
+
   const buffer: ProviderEvent[] = [];
   let waker: (() => void) | null = null;
   const kick = (): void => {
     waker?.();
     waker = null;
   };
+  setAbortWaker(kick);
 
   const handler = (n: JsonRpcNotification): void => {
     const method = n.method;
-    const params = n.params;
-
-    // Every inbound notification counts as activity for the poll-loop's
-    // idle timer — yield before any event-specific translation so even
-    // long tool executions keep the loop awake.
+    const params = n.params ?? {};
     buffer.push({ type: 'activity' });
 
     switch (method) {
@@ -251,8 +269,16 @@ async function* runOneTurn(
         }
         break;
       }
+      case 'turn/started': {
+        const turn = params.turn as { id?: string } | undefined;
+        if (turn?.id) {
+          turnId = turn.id;
+          setActiveTurn(turn.id);
+        }
+        break;
+      }
       case 'item/agentMessage/delta': {
-        const delta = params.delta as string;
+        const delta = params.delta as string | undefined;
         if (delta) resultText += delta;
         break;
       }
@@ -261,23 +287,35 @@ async function* runOneTurn(
         if (item?.type === 'agentMessage' && item.text) resultText = item.text;
         break;
       }
-      case 'turn/completed':
-        turnDone = true;
-        break;
-      case 'turn/failed': {
-        const e = params.error as { message?: string } | undefined;
-        turnState.error = new Error(e?.message || 'Turn failed');
-        turnDone = true;
-        break;
-      }
       case 'thread/status/changed': {
         const status = params.status as string | undefined;
         if (status) buffer.push({ type: 'progress', message: `status: ${status}` });
         break;
       }
+      case 'error': {
+        const err = params.error as { message?: string; additionalDetails?: string | null } | undefined;
+        const msg = [err?.message, err?.additionalDetails].filter(Boolean).join(': ') || 'Codex turn failed';
+        state.error = new Error(msg);
+        finishTurn();
+        break;
+      }
+      case 'turn/completed': {
+        const turn = params.turn as
+          | { error?: { message?: string; additionalDetails?: string | null } | null; items?: unknown[] }
+          | undefined;
+        const agentMessage = turn?.items
+          ?.filter((item): item is { type: string; text?: string } => typeof item === 'object' && item !== null)
+          .find((item) => item.type === 'agentMessage' && item.text);
+        if (agentMessage?.text) resultText = agentMessage.text;
+        if (turn?.error) {
+          const msg =
+            [turn.error.message, turn.error.additionalDetails].filter(Boolean).join(': ') || 'Codex turn failed';
+          state.error = new Error(msg);
+        }
+        finishTurn();
+        break;
+      }
       default:
-        // Silently handle the many item/* notifications — they already
-        // contributed an activity event above.
         break;
     }
 
@@ -286,28 +324,44 @@ async function* runOneTurn(
 
   server.notificationHandlers.push(handler);
 
+  // A dead app-server can't send the notification this turn is parked on —
+  // end the turn immediately with the real cause instead of the 10-min timeout.
+  const onServerExit = (err: Error): void => {
+    if (turnDone) return;
+    state.error = err;
+    finishTurn();
+    kick();
+  };
+  server.exitHandlers.push(onServerExit);
+
   const timer = setTimeout(() => {
-    turnState.error = new Error(`Turn timed out after ${TURN_TIMEOUT_MS}ms`);
-    turnDone = true;
+    state.error = new Error(`Turn timed out after ${TURN_TIMEOUT_MS}ms`);
+    finishTurn();
     kick();
   }, TURN_TIMEOUT_MS);
 
   try {
-    // If we yield init before turn/start, the poll-loop stores
-    // continuation early and survives a mid-turn crash.
     if (!hasInit()) {
       markInit();
       buffer.push({ type: 'init', continuation: threadId });
     }
 
-    await startCodexTurn(server, { threadId, inputText, model, cwd });
+    turnId = await startTurn(server, {
+      threadId,
+      inputText,
+      model,
+      effort,
+      cwd,
+    });
+    setActiveTurn(turnId);
+    const imagesBefore = listGeneratedImages(threadId);
+    if (isAborted()) return;
 
     while (true) {
       while (buffer.length > 0) {
-        const ev = buffer.shift()!;
-        yield ev;
+        yield buffer.shift()!;
       }
-      if (turnDone) break;
+      if (turnDone || isAborted()) break;
       await new Promise<void>((resolve) => {
         waker = resolve;
       });
@@ -316,16 +370,49 @@ async function* runOneTurn(
 
     while (buffer.length > 0) yield buffer.shift()!;
 
-    if (turnState.error) {
-      yield { type: 'error', message: turnState.error.message, retryable: false };
-      return;
+    if (isAborted()) return;
+
+    if (state.error) {
+      yield {
+        type: 'error',
+        message: state.error.message,
+        retryable: false,
+        classification: classifyError(state.error.message),
+      };
+      throw state.error;
+    }
+
+    for (const imagePath of listGeneratedImages(threadId)) {
+      if (!imagesBefore.has(imagePath)) {
+        yield { type: 'file', path: imagePath };
+      }
     }
 
     yield { type: 'result', text: resultText || null };
   } finally {
     clearTimeout(timer);
+    clearActiveTurn();
+    setAbortWaker(null);
     const idx = server.notificationHandlers.indexOf(handler);
     if (idx >= 0) server.notificationHandlers.splice(idx, 1);
+    const exitIdx = server.exitHandlers.indexOf(onServerExit);
+    if (exitIdx >= 0) server.exitHandlers.splice(exitIdx, 1);
+  }
+}
+
+/**
+ * Codex's built-in image generation saves into CODEX_HOME/generated_images/
+ * <threadId>/ — its native client renders those to the user, so the model
+ * believes delivery already happened and won't send_file them. The runner
+ * must deliver them itself: snapshot the dir at turn start, emit a `file`
+ * event for anything new at turn end.
+ */
+function listGeneratedImages(threadId: string): Set<string> {
+  const dir = path.join(process.env.CODEX_HOME || '/home/node/.codex', 'generated_images', threadId);
+  try {
+    return new Set(fs.readdirSync(dir).map((f) => path.join(dir, f)));
+  } catch {
+    return new Set();
   }
 }
 
