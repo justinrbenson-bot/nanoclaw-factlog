@@ -246,6 +246,18 @@ export function computeIsMention(isGroup: boolean, botMentionedInGroup: boolean)
   return botMentionedInGroup ? true : undefined;
 }
 
+/**
+ * Append a visible note for media that failed to download, so the agent knows
+ * something was sent rather than silently losing the attachment — or the whole
+ * message, when an uncaptioned image would otherwise be dropped by the
+ * empty-message guard. Returns `content` unchanged when nothing failed.
+ */
+export function appendMediaFailureNote(content: string, failures: string[]): string {
+  if (failures.length === 0) return content;
+  const note = failures.map((t) => `[${t} could not be downloaded]`).join(' ');
+  return content ? `${content}\n${note}` : note;
+}
+
 /** Map file extension to Baileys media message type. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function buildMediaMessage(data: Buffer, filename: string, ext: string, caption?: string): any {
@@ -428,7 +440,10 @@ registerChannelAdapter('whatsapp', {
     async function downloadInboundMedia(
       msg: WAMessage,
       normalized: any,
-    ): Promise<Array<{ type: string; name: string; localPath: string }>> {
+    ): Promise<{
+      attachments: Array<{ type: string; name: string; localPath: string }>;
+      failures: string[];
+    }> {
       const mediaTypes: Array<{ key: string; type: string; ext: string }> = [
         { key: 'imageMessage', type: 'image', ext: '.jpg' },
         { key: 'videoMessage', type: 'video', ext: '.mp4' },
@@ -436,10 +451,20 @@ registerChannelAdapter('whatsapp', {
         { key: 'documentMessage', type: 'document', ext: '' },
       ];
       const results: Array<{ type: string; name: string; localPath: string }> = [];
+      const failures: string[] = [];
       for (const { key, type, ext } of mediaTypes) {
         if (!normalized[key]) continue;
         try {
-          const buffer = await downloadMediaMessage(msg, 'buffer', {});
+          // Pass reuploadRequest so Baileys can ask WhatsApp to re-upload the
+          // media when the direct CDN fetch fails or the media URL has expired
+          // (common around reconnects). Without it, a "Failed to fetch stream"
+          // is unrecoverable and the attachment is silently lost.
+          const buffer = await downloadMediaMessage(
+            msg,
+            'buffer',
+            {},
+            { reuploadRequest: sock.updateMediaMessage, logger: baileysLogger },
+          );
           // documentMessage.fileName is attacker-controlled and rides through
           // WhatsApp's E2E channel — Meta can't sanitize it server-side. Without
           // this guard, a `..`-laden fileName escapes attachDir on path.join.
@@ -460,9 +485,10 @@ registerChannelAdapter('whatsapp', {
           log.info('Media downloaded', { type, filename });
         } catch (err) {
           log.warn('Failed to download media', { type, err });
+          failures.push(type);
         }
       }
-      return results;
+      return { attachments: results, failures };
     }
 
     async function sendRawMessage(jid: string, text: string, mentions?: string[]): Promise<string | undefined> {
@@ -699,7 +725,12 @@ registerChannelAdapter('whatsapp', {
             }
 
             // Download media attachments (images, video, audio, documents)
-            const attachments = await downloadInboundMedia(msg, normalized);
+            const { attachments, failures } = await downloadInboundMedia(msg, normalized);
+
+            // Surface failed downloads as text so the agent knows media was
+            // sent even when it couldn't be fetched — instead of silently
+            // dropping the attachment (or the whole message, if uncaptioned).
+            content = appendMediaFailureNote(content, failures);
 
             // Skip empty protocol messages (no text and no attachments)
             if (!content && attachments.length === 0) continue;

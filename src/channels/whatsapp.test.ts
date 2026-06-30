@@ -16,7 +16,12 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { computeIsMention, isBotMentionedInGroup, parseWhatsAppMentions } from './whatsapp.js';
+import {
+  appendMediaFailureNote,
+  computeIsMention,
+  isBotMentionedInGroup,
+  parseWhatsAppMentions,
+} from './whatsapp.js';
 
 const BOT_PHONE_JID = '15550009999@s.whatsapp.net';
 const BOT_LID_USER = '987654321';
@@ -158,5 +163,30 @@ describe('parseWhatsAppMentions', () => {
     const { text, mentions } = parseWhatsAppMentions('(@15551234567) wrote this');
     expect(text).toBe('(@15551234567) wrote this');
     expect(mentions).toEqual(['15551234567@s.whatsapp.net']);
+  });
+});
+
+describe('appendMediaFailureNote', () => {
+  it('returns content unchanged when nothing failed', () => {
+    expect(appendMediaFailureNote('hello', [])).toBe('hello');
+  });
+
+  it('appends the note on its own line when a captioned message has a failed download', () => {
+    expect(appendMediaFailureNote('check this out', ['image'])).toBe(
+      'check this out\n[image could not be downloaded]',
+    );
+  });
+
+  it('uses the note as the content when an uncaptioned media message fails (would otherwise be dropped)', () => {
+    // Regression guard: an uncaptioned image whose download fails must still
+    // produce a non-empty message, or the empty-message guard skips it and the
+    // agent never learns media was sent.
+    expect(appendMediaFailureNote('', ['image'])).toBe('[image could not be downloaded]');
+  });
+
+  it('lists each failed media type when several fail together', () => {
+    expect(appendMediaFailureNote('', ['image', 'document'])).toBe(
+      '[image could not be downloaded] [document could not be downloaded]',
+    );
   });
 });
