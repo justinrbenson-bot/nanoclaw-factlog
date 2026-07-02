@@ -46,6 +46,11 @@ export function getChannelContainerConfig(name: string): ChannelRegistration['co
   return registry.get(name)?.containerConfig;
 }
 
+/** Get a channel's registration (factory + container config) by its registry name. */
+export function getChannelRegistration(name: string): ChannelRegistration | undefined {
+  return registry.get(name);
+}
+
 /**
  * Instantiate and set up all registered channel adapters.
  * Skips adapters that return null (missing credentials).
@@ -85,8 +90,16 @@ export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => 
           throw err;
         }
       }
-      activeAdapters.set(adapter.channelType, adapter);
-      log.info('Channel adapter started', { channel: name, type: adapter.channelType });
+      // Key by instance (default instance = channelType), so multiple
+      // adapters of one platform coexist instead of last-write-wins. Without
+      // this, a bridge whose underlying Chat SDK adapter hardcodes the
+      // platform name (e.g. WhatsApp Cloud → channelType 'whatsapp') would
+      // silently overwrite the native 'whatsapp' adapter, and vice versa
+      // (#2911). For every existing single-instance adapter `instance` is
+      // undefined, so the key stays the channelType — behavior unchanged.
+      const key = adapter.instance ?? adapter.channelType;
+      activeAdapters.set(key, adapter);
+      log.info('Channel adapter started', { channel: name, type: adapter.channelType, instance: key });
     } catch (err) {
       log.error('Failed to start channel adapter', { channel: name, err });
     }

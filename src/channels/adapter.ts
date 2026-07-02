@@ -113,6 +113,16 @@ export interface ChannelAdapter {
   channelType: string;
 
   /**
+   * Adapter-instance name — distinguishes N adapters of one platform
+   * (e.g. a native WhatsApp bridge alongside the WhatsApp Cloud bridge, or
+   * three Slack apps in one workspace). Defaults to channelType.
+   * channelType stays the SEMANTIC platform key (user ids '<channelType>:<handle>',
+   * formatting, container config); instance is a host-side routing key only.
+   * Must be unique across active adapters and URL-safe (no '/', '?', ':').
+   */
+  instance?: string;
+
+  /**
    * Whether this adapter models conversations as threads.
    *
    * true  — adapter's platform uses threads as the primary conversation unit
