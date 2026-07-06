@@ -31,18 +31,29 @@ export type CommandDef<TArgs = unknown, TData = unknown> = {
    * Custom operations return ad-hoc shapes and leave this undefined.
    */
   generic?: 'list' | 'get';
+  /**
+   * Dotted audit action name, e.g. `groups.config.add-mcp-server`. Stamped
+   * explicitly by `registerResource` (which knows verb segment boundaries);
+   * hand-registered commands may omit it and get `name` with dashes→dots.
+   */
+  action: string;
   /** Validates `frame.args` and produces the typed handler input. Throws on invalid. */
   parseArgs: (raw: Record<string, unknown>) => TArgs;
   handler: (args: TArgs, ctx: CallerContext) => Promise<TData>;
 };
 
+/** `register()` input — `action` is defaulted, everything else as stored. */
+export type CommandInput<TArgs = unknown, TData = unknown> = Omit<CommandDef<TArgs, TData>, 'action'> & {
+  action?: string;
+};
+
 const registry = new Map<string, CommandDef>();
 
-export function register<TArgs, TData>(def: CommandDef<TArgs, TData>): void {
+export function register<TArgs, TData>(def: CommandInput<TArgs, TData>): void {
   if (registry.has(def.name)) {
     throw new Error(`CLI command "${def.name}" already registered`);
   }
-  registry.set(def.name, def as CommandDef);
+  registry.set(def.name, { ...def, action: def.action ?? def.name.replace(/-/g, '.') } as CommandDef);
 }
 
 export function lookup(name: string): CommandDef | undefined {

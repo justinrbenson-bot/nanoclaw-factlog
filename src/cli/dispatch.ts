@@ -6,20 +6,36 @@
  * Approval gating for risky calls from the container is the only branch
  * that differs by caller. Host callers and `open` commands run inline.
  */
+import { withAudit } from '../audit/wrappers.js';
 import { getContainerConfig } from '../db/container-configs.js';
 import { getAgentGroup } from '../db/agent-groups.js';
 import { getSession } from '../db/sessions.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
 import type { CallerContext, ErrorCode, RequestFrame, ResponseFrame } from './frame.js';
 import { getResource } from './crud.js';
-import { lookup } from './registry.js';
+import { type CommandDef, lookup } from './registry.js';
 
-type DispatchOptions = {
-  /** True when a command is being replayed after approval. */
-  approved?: boolean;
+/**
+ * Out-param for the audit middleware: dispatch reassigns `req` internally
+ * (dash-joined id fallback, group-scope auto-fill), so the wrapper can't see
+ * the resolved command or effective args on the frame it passed in.
+ */
+export type DispatchTrace = {
+  cmd?: CommandDef;
+  command?: string;
+  args?: Record<string, unknown>;
 };
 
-export async function dispatch(
+export type DispatchOptions = {
+  /** True when a command is being replayed after approval. */
+  approved?: boolean;
+  /** Approval id when replaying — becomes the terminal audit event's correlation_id. */
+  approvalId?: string;
+  /** Filled by dispatch for the audit middleware. */
+  trace?: DispatchTrace;
+};
+
+async function dispatchInner(
   req: RequestFrame,
   ctx: CallerContext,
   opts: DispatchOptions = {},
@@ -46,6 +62,12 @@ export async function dispatch(
         break;
       }
     }
+  }
+
+  if (opts.trace) {
+    opts.trace.cmd = cmd;
+    opts.trace.command = req.command;
+    opts.trace.args = req.args;
   }
 
   if (!cmd) {
@@ -102,6 +124,7 @@ export async function dispatch(
         fill.id = req.args.id ?? ctx.agentGroupId;
       }
       req = { ...req, args: { ...req.args, ...fill } };
+      if (opts.trace) opts.trace.args = req.args;
 
       // Fail-closed pre-handler check for sessions-get: returns "not found"
       // regardless of whether the UUID exists in another group, preventing an
@@ -192,10 +215,19 @@ export async function dispatch(
   }
 }
 
-registerApprovalHandler('cli_command', async ({ payload, notify }) => {
+/**
+ * Public dispatcher — the audit middleware wraps the inner dispatcher, so all
+ * three call sites (socket server, container delivery-action, and the
+ * approved replay below) emit audit events with zero caller changes.
+ */
+export const dispatch = withAudit(dispatchInner);
+
+registerApprovalHandler('cli_command', async ({ payload, notify, approvalId }) => {
   const frame = payload.frame as RequestFrame;
   const callerContext = parseCallerContext(payload.callerContext) ?? { caller: 'host' };
-  const response = await dispatch(frame, callerContext, { approved: true });
+  // approvalId threads through to the audit middleware: the replay's terminal
+  // event carries the gated chain's correlation_id, emitted there — not here.
+  const response = await dispatch(frame, callerContext, { approved: true, approvalId });
 
   if (response.ok) {
     const data = typeof response.data === 'string' ? response.data : JSON.stringify(response.data, null, 2);

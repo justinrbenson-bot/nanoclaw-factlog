@@ -9,6 +9,7 @@ import path from 'path';
 import { backfillContainerConfigs } from './backfill-container-configs.js';
 import { DATA_DIR } from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
+import { initAuditLog } from './audit/index.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
@@ -81,6 +82,10 @@ async function main(): Promise<void> {
 
   // 1c. One-time filesystem cutover — idempotent, no-op after first run.
   migrateGroupsToClaudeLocal();
+
+  // 1d. Audit log — registers the decision observer; when enabled, asserts
+  // data/audit/ is writable (throw → exit 1) and runs the boot prune.
+  initAuditLog();
 
   // 2. Container runtime
   ensureContainerRuntimeRunning();

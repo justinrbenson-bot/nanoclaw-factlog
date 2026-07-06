@@ -71,6 +71,7 @@ For ad-hoc queries from skills or scripts, use the in-tree wrapper rather than t
 | `src/command-gate.ts` | Router-side admin command gate — queries `user_roles` directly (no env var, no container-side check) |
 | `src/modules/approvals/onecli-approvals.ts` | OneCLI credentialed-action approval bridge |
 | `src/modules/permissions/user-dm.ts` | Cold-DM resolution + `user_dms` cache |
+| `src/audit/` | Opt-in local audit log (`AUDIT_ENABLED=true`): single emit seam + wrappers composed at module edges (dispatch middleware, `requestApproval` decorator, approval-resolved observer, permissions/OneCLI/create-agent seams), append-only NDJSON day-files under `data/audit/`, retention prune, `ncl audit` reader. See the "Local Audit Log" section in [docs/SECURITY.md](docs/SECURITY.md) |
 | `src/group-init.ts` | Per-agent-group filesystem scaffold (CLAUDE.md, skills) — agent-runner source is a shared read-only mount, not copied per group |
 | `src/db/container-configs.ts` | CRUD for `container_configs` table (per-group container runtime config) |
 | `src/backfill-container-configs.ts` | Migrates legacy `container.json` files into the DB on startup |
@@ -108,6 +109,7 @@ ncl help
 | user-dms | list | Cold-DM cache (read-only) |
 | dropped-messages | list | Messages from unregistered senders (read-only) |
 | approvals | list, get | Pending approval requests (read-only) |
+| audit | list | Local audit log (read-only; host + global scope only; requires `AUDIT_ENABLED=true`; `--format ndjson` for export) |
 
 Key files: `src/cli/dispatch.ts` (dispatcher + approval handler), `src/cli/crud.ts` (generic CRUD registration), `src/cli/resources/` (per-resource definitions).
 

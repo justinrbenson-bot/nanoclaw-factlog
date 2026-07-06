@@ -43,6 +43,7 @@ import {
   syncProcessingAcks,
   type ContainerState,
 } from './db/session-db.js';
+import { pruneAuditLogIfDue } from './audit/index.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
@@ -163,6 +164,14 @@ async function sweep(): Promise<void> {
     log.error('Reject-with-reason sweep failed', { err });
   }
   // MODULE-HOOK:approvals-reason-sweep:end
+
+  // Audit retention — unlink day-files past AUDIT_RETENTION_DAYS. Throttled
+  // to once per UTC day inside the module; no-op when audit is disabled.
+  try {
+    pruneAuditLogIfDue();
+  } catch (err) {
+    log.error('Audit prune failed', { err });
+  }
 
   setTimeout(sweep, SWEEP_INTERVAL_MS);
 }

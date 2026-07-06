@@ -21,6 +21,9 @@
  * exposing just user-roles/user-dms) is more churn than it's worth. Revisit
  * if either module becomes genuinely optional (see REFACTOR_PLAN open q #3).
  */
+// Direct file import (not the audit barrel): the barrel pulls in observer.ts,
+// which imports this module — the narrow path keeps init order trivial.
+import { auditRequestApproval } from '../../audit/wrappers.js';
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { createPendingApproval, getSession } from '../../db/sessions.js';
@@ -61,6 +64,8 @@ export interface ApprovalHandlerContext {
   payload: Record<string, unknown>;
   /** User ID of the admin who approved. Empty string if unknown. */
   userId: string;
+  /** pending_approvals id of the approval that authorized this run. */
+  approvalId: string;
   /** Send a system chat message to the requesting agent's session. */
   notify: (text: string) => void;
 }
@@ -215,18 +220,29 @@ export interface RequestApprovalOptions {
 }
 
 /**
+ * A successfully queued hold — what the audit decorator needs to emit the
+ * pending event (the id is minted and the approver picked in here, invisible
+ * to callers otherwise). Null when no hold reached an approver.
+ */
+export interface ApprovalHold {
+  approvalId: string;
+  /** The approver the card was actually delivered to. */
+  approverUserId: string;
+}
+
+/**
  * Queue an approval request. Picks an approver, delivers the card to their
  * DM, and records the pending_approvals row. Fire-and-forget from the
  * caller's perspective — the admin's response kicks off the registered
  * approval handler for this action via the response dispatcher.
  */
-export async function requestApproval(opts: RequestApprovalOptions): Promise<void> {
+async function requestApprovalInner(opts: RequestApprovalOptions): Promise<ApprovalHold | null> {
   const { session, action, payload, title, question, agentName, approverUserId } = opts;
 
   const approvers = approverUserId ? [approverUserId] : pickApprover(session.agent_group_id);
   if (approvers.length === 0) {
     notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
-    return;
+    return null;
   }
 
   const originChannelType = session.messaging_group_id
@@ -236,7 +252,7 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
   const target = await pickApprovalDelivery(approvers, originChannelType);
   if (!target) {
     notifyAgent(session, `${action} failed: no DM channel found for any eligible approver.`);
-    return;
+    return null;
   }
 
   const approvalId = `appr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -272,9 +288,17 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     } catch (err) {
       log.error('Failed to deliver approval card', { action, approvalId, err });
       notifyAgent(session, `${action} failed: could not deliver approval request to ${target.userId}.`);
-      return;
+      return null;
     }
   }
 
   log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });
+  return { approvalId, approverUserId: target.userId };
 }
+
+/**
+ * Public export — the audit decorator wraps the inner request so every gated
+ * hold emits its pending event from one place. Callers see Promise<void>
+ * semantics as before (the hold value is audit plumbing).
+ */
+export const requestApproval = auditRequestApproval(requestApprovalInner);

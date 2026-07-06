@@ -17,6 +17,8 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
+  'AUDIT_ENABLED',
+  'AUDIT_RETENTION_DAYS',
 ]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -63,6 +65,14 @@ export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
 export const ONECLI_GATEWAY_CONTAINER =
   process.env.ONECLI_GATEWAY_CONTAINER || envConfig.ONECLI_GATEWAY_CONTAINER || 'onecli';
+
+// Local audit log — opt-in (docs/SECURITY.md, "Local Audit Log"). Off by
+// default: the audit emitter no-ops and data/audit/ is never created.
+export const AUDIT_ENABLED = (process.env.AUDIT_ENABLED || envConfig.AUDIT_ENABLED) === 'true';
+// Audit day-files older than this many days are unlinked (a hard delete).
+// 0 = keep forever. Read only when AUDIT_ENABLED=true.
+const auditRetentionRaw = parseInt(process.env.AUDIT_RETENTION_DAYS || envConfig.AUDIT_RETENTION_DAYS || '90', 10);
+export const AUDIT_RETENTION_DAYS = Number.isNaN(auditRetentionRaw) ? 90 : auditRetentionRaw;
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.
