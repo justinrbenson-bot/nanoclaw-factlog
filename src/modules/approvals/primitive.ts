@@ -21,6 +21,8 @@
  * exposing just user-roles/user-dms) is more churn than it's worth. Revisit
  * if either module becomes genuinely optional (see REFACTOR_PLAN open q #3).
  */
+// Sibling adapter import; it imports this module back type-only (no cycle).
+import { auditRequestApproval } from './approvals.audit.js';
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { createPendingApproval, getSession } from '../../db/sessions.js';
@@ -234,7 +236,7 @@ export interface ApprovalHold {
  * response kicks off the registered approval handler for this action via the
  * response dispatcher.
  */
-export async function requestApproval(opts: RequestApprovalOptions): Promise<ApprovalHold | null> {
+async function requestApprovalInner(opts: RequestApprovalOptions): Promise<ApprovalHold | null> {
   const { session, action, payload, title, question, agentName, approverUserId } = opts;
 
   const approvers = approverUserId ? [approverUserId] : pickApprover(session.agent_group_id);
@@ -293,3 +295,10 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<App
   log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });
   return { approvalId, approverUserId: target.userId };
 }
+
+/**
+ * Public export — the audit decorator wraps the inner request so every gated
+ * hold emits its pending event from one place. Pass-through: callers see the
+ * hold exactly as the inner returns it.
+ */
+export const requestApproval = auditRequestApproval(requestApprovalInner);

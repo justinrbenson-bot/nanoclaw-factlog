@@ -164,6 +164,15 @@ async function sweep(): Promise<void> {
   }
   // MODULE-HOOK:approvals-reason-sweep:end
 
+  // Audit maintenance — retention prune (throttled to once per UTC day
+  // inside the module) + post-write hooks' maintain(). No-op when disabled.
+  try {
+    const { maintainAudit } = await import('./audit/index.js');
+    maintainAudit();
+  } catch (err) {
+    log.error('Audit maintenance failed', { err });
+  }
+
   setTimeout(sweep, SWEEP_INTERVAL_MS);
 }
 

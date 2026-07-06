@@ -6,6 +6,7 @@
  * Approval gating for risky calls from the container is the only branch
  * that differs by caller. Host callers and `open` commands run inline.
  */
+import { withAudit } from './dispatch.audit.js';
 import { getContainerConfig } from '../db/container-configs.js';
 import { getAgentGroup } from '../db/agent-groups.js';
 import { getSession } from '../db/sessions.js';
@@ -35,7 +36,7 @@ export type DispatchOptions = {
   trace?: DispatchTrace;
 };
 
-export async function dispatch(
+async function dispatchInner(
   req: RequestFrame,
   ctx: CallerContext,
   opts: DispatchOptions = {},
@@ -214,6 +215,13 @@ export async function dispatch(
     return err(req.id, 'handler-error', errMsg(e));
   }
 }
+
+/**
+ * Public dispatcher — the audit middleware wraps the inner dispatcher, so the
+ * socket server, the container delivery-action, and the approved replay are
+ * all covered without changing a call site.
+ */
+export const dispatch = withAudit(dispatchInner);
 
 registerApprovalHandler('cli_command', async ({ payload, notify, approvalId }) => {
   const frame = payload.frame as RequestFrame;

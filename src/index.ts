@@ -82,6 +82,13 @@ async function main(): Promise<void> {
   // 1c. One-time filesystem cutover — idempotent, no-op after first run.
   migrateGroupsToClaudeLocal();
 
+  // 1d. Audit log (opt-in — AUDIT_ENABLED gates writes). The observer import
+  // self-registers approvals.decide; initAuditLog asserts data/audit/ is
+  // writable when enabled (throw → exit 1) and starts post-write hooks.
+  await import('./modules/approvals/approvals-observer.audit.js');
+  const { initAuditLog } = await import('./audit/index.js');
+  initAuditLog();
+
   // 2. Container runtime
   ensureContainerRuntimeRunning();
   cleanupOrphans();

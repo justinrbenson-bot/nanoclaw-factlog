@@ -19,6 +19,7 @@
  */
 import { OneCLI, type ApprovalRequest, type ManualApprovalHandle } from '@onecli-sh/sdk';
 
+import { auditOneCliDecision, auditOneCliExpiry, auditOneCliHold, auditOneCliSweep } from './approvals.audit.js';
 import { pickApprovalDelivery, pickApprover } from './primitive.js';
 import { ONECLI_API_KEY, ONECLI_URL } from '../../config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
@@ -64,12 +65,15 @@ function shortApprovalId(): string {
   return `oa-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/** Row insert for a hold — the audit wrapper emits the pending event from it. */
+const recordOneCliHold = auditOneCliHold(createPendingApproval);
+
 /**
  * Called from the approvals response handler when a card button is clicked.
  * `userId` is the namespaced id of the clicking admin — the resolution's
  * identity, recorded here (empty when the resolver is a timer/sweep).
  */
-export function resolveOneCLIApproval(approvalId: string, selectedOption: string, userId: string): boolean {
+function resolveOneCLIApprovalInner(approvalId: string, selectedOption: string, userId: string): boolean {
   const state = pending.get(approvalId);
   if (!state) return false;
   pending.delete(approvalId);
@@ -85,6 +89,13 @@ export function resolveOneCLIApproval(approvalId: string, selectedOption: string
   log.info('OneCLI approval resolved', { approvalId, decision, decidedBy: userId || 'system' });
   return true;
 }
+
+/**
+ * The audit wrapper records the decision with the clicking admin as actor
+ * (OneCLI rows never reach notifyApprovalResolved, so the shared observer
+ * can't cover them).
+ */
+export const resolveOneCLIApproval = auditOneCliDecision(resolveOneCLIApprovalInner);
 
 export function startOneCLIApprovalHandler(deliveryAdapter: ChannelDeliveryAdapter): void {
   if (handle) return;
@@ -174,7 +185,7 @@ async function handleRequest(request: ApprovalRequest): Promise<Decision> {
     return 'deny';
   }
 
-  createPendingApproval({
+  recordOneCliHold({
     approval_id: approvalId,
     session_id: null,
     request_id: request.id,
@@ -218,7 +229,7 @@ async function handleRequest(request: ApprovalRequest): Promise<Decision> {
   });
 }
 
-async function expireApproval(approvalId: string, reason: string): Promise<void> {
+async function expireApprovalInner(approvalId: string, reason: string): Promise<void> {
   const rows = getPendingApprovalsByAction(ONECLI_ACTION).filter((r) => r.approval_id === approvalId);
   const row = rows[0];
   if (!row) return;
@@ -228,6 +239,9 @@ async function expireApproval(approvalId: string, reason: string): Promise<void>
   deletePendingApproval(approvalId);
   log.info('OneCLI approval expired', { approvalId, reason });
 }
+
+/** Timer-driven expiry — the audit wrapper records a system-actor rejection. */
+const expireApproval = auditOneCliExpiry(expireApprovalInner);
 
 async function editCardExpired(row: PendingApproval, reason: string): Promise<void> {
   if (!adapterRef || !row.platform_message_id || !row.channel_type || !row.platform_id) return;
@@ -248,7 +262,7 @@ async function editCardExpired(row: PendingApproval, reason: string): Promise<vo
   }
 }
 
-async function sweepStaleApprovals(): Promise<void> {
+async function sweepStaleApprovalsInner(): Promise<void> {
   const rows = getPendingApprovalsByAction(ONECLI_ACTION);
   if (rows.length === 0) return;
   log.info('Sweeping stale OneCLI approvals from previous process', { count: rows.length });
@@ -257,6 +271,11 @@ async function sweepStaleApprovals(): Promise<void> {
     deletePendingApproval(row.approval_id);
   }
 }
+
+/** Startup sweep — the audit wrapper records a system-actor rejection per row. */
+const sweepStaleApprovals = auditOneCliSweep(sweepStaleApprovalsInner, () =>
+  getPendingApprovalsByAction(ONECLI_ACTION),
+);
 
 /** The hosted gateway's structured request summary — not yet in the SDK's
  *  ApprovalRequest type (observed on api.onecli.sh, 2026-07): the action being

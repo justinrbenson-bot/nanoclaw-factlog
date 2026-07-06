@@ -169,6 +169,61 @@ pip, curl, node/bun with the proxy env) are unaffected. Any workflow that relies
 on a **non-proxy-aware** tool reaching the internet directly will fail by design.
 Lockdown is **off by default**; opt in with `NANOCLAW_EGRESS_LOCKDOWN=true`.
 
+### 6. Local Audit Log (Opt-In)
+
+Every `ncl` command (both transports — host socket and container — including
+denials) and every approval the host routes (request, decision, and terminal
+outcome; covering CLI gates, self-mod, a2a message gates, agent creation, the
+permissions sender/channel cards, and OneCLI credential holds) is recorded as
+one canonical, SIEM-shaped JSON event.
+
+- **Off by default.** Nothing is persisted until an operator sets
+  `AUDIT_ENABLED=true`; when disabled, the emitter no-ops and `data/audit/` is
+  never created. `ncl audit list` on a disabled box errors instead of returning
+  an empty list.
+- **Store:** append-only NDJSON day-files under `data/audit/<UTC-day>.ndjson`,
+  written only by the host process. Retention is a hard delete — whole
+  day-files past the horizon are unlinked at boot and once daily in the host
+  sweep.
+- **Fail-open + loud:** a failed append is logged and the action proceeds (a
+  full disk must not brick recovery commands). At boot, an enabled box refuses
+  to start if `data/audit/` isn't writable.
+- **No secrets, no message bodies:** a recursive key mask
+  (`token|secret|key|password|credential|auth|bearer`) redacts details at the
+  single emit point, values are truncated to ~2 KB, and message-bearing events
+  (a2a gates, OneCLI body previews) record shape only — `body_chars` and
+  attachment names, never content.
+- **Scope:** `ncl audit list` is available to host callers and global-scope
+  agents only. `audit` is not on the group-scope allowlist, so confined agents
+  are refused before any handler runs.
+
+| Env | Default | Meaning |
+| --- | --- | --- |
+| `AUDIT_ENABLED` | `false` | Set `true` to record audit events. |
+| `AUDIT_RETENTION_DAYS` | `90` | Days before day-files are unlinked; `0` = keep forever. Read only when enabled. |
+
+Read back with `ncl audit list --actor … --action … --resource … --outcome …
+--since 7d --correlation … --limit 100`; `--format ndjson` streams the stored
+lines for SIEM export. Event fields are chosen to project losslessly onto
+OCSF and Elastic ECS; forwarding is a mapping exercise, deferred until a
+forwarder exists.
+
+**Integration surfaces** (no push forwarder ships in core — credentials and
+transport for external systems never live here):
+
+1. **Tail the store** — any external agent (Vector, Filebeat, Fluent Bit, a
+   custom daemon) tails `data/audit/*.ndjson`; the format is stable and
+   `schema_version`-stamped.
+2. **Pull via the CLI** — poll `ncl audit list --format ndjson --since …` and
+   dedupe on `event_id`.
+3. **In-process post-write hooks** — a module (in-tree or skill-installed)
+   calls `registerAuditHook({ name, onEvent, init?, maintain?, shutdown? })`
+   from `src/audit/`. Hooks fire only **after** an event is durably appended
+   to the local day-file, so anything exported is guaranteed to exist in the
+   source of truth; a hook that misses events catches up by reading the
+   day-files (at-least-once). Hook failures are isolated and logged — they
+   never affect the log, other hooks, or the audited action.
+
 ## Resource Limits
 
 Per-container CPU and memory caps are **opt-in and unset by default** — a runaway

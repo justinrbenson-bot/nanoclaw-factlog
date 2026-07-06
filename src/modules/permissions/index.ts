@@ -27,6 +27,7 @@ import {
   setSenderScopeGate,
   type AccessGateResult,
 } from '../../router.js';
+import { auditChannelDecision, auditChannelNameInterceptor, auditSenderDecision } from './permissions.audit.js';
 import type { InboundEvent } from '../../channels/adapter.js';
 import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
 import { getDeliveryAdapter } from '../../delivery.js';
@@ -309,7 +310,7 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<S
   return { claimed: true, decision };
 }
 
-registerResponseHandler(async (payload) => (await handleSenderApprovalResponse(payload)).claimed);
+registerResponseHandler(auditSenderDecision(handleSenderApprovalResponse));
 
 // ── Unknown-channel registration flow ──
 
@@ -567,7 +568,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   };
 }
 
-registerResponseHandler(async (payload) => (await handleChannelApprovalResponse(payload)).claimed);
+registerResponseHandler(auditChannelDecision(handleChannelApprovalResponse));
 
 // ── Free-text name interceptor ──
 // Captures the next DM from an approver who clicked "Create new agent",
@@ -693,4 +694,4 @@ async function channelNameInterceptor(event: InboundEvent): Promise<ChannelAppro
   return { claimed: true, decision: { kind: 'connected', ...decisionBase } };
 }
 
-registerMessageInterceptor(async (event) => (await channelNameInterceptor(event)).claimed);
+registerMessageInterceptor(auditChannelNameInterceptor(channelNameInterceptor));

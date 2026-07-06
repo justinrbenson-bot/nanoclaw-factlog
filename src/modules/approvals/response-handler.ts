@@ -15,6 +15,7 @@
  * The response handler is registered via core's `registerResponseHandler`;
  * core iterates handlers and the first one to return `true` claims the response.
  */
+import { runApprovedHandler } from './approvals.audit.js';
 import { wakeContainer } from '../../container-runner.js';
 import { deletePendingApproval, getPendingApproval, getSession } from '../../db/sessions.js';
 import type { ResponsePayload } from '../../response-registry.js';
@@ -112,7 +113,14 @@ async function handleRegisteredApproval(
 
   const payload = JSON.parse(approval.payload);
   try {
-    await handler({ session, payload, userId, approvalId: approval.approval_id, notify });
+    // runApprovedHandler wraps the invocation to emit the gated chain's
+    // terminal audit event; rethrows, so the catch below behaves as before.
+    await runApprovedHandler(
+      handler,
+      { session, payload, userId, approvalId: approval.approval_id, notify },
+      approval,
+      session,
+    );
     log.info('Approval handled', { approvalId: approval.approval_id, action: approval.action, userId });
   } catch (err) {
     log.error('Approval handler threw', { approvalId: approval.approval_id, action: approval.action, err });
