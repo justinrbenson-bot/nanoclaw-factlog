@@ -1,0 +1,51 @@
+/**
+ * Decision events (installed by /add-audit) — approvals.decide, one per
+ * resolved approval, riding the existing approval-resolved hook. Covers every
+ * requestApproval-backed action (cli_command, self-mod, create_agent, a2a
+ * gate); OneCLI never reaches notifyApprovalResolved and emits its decisions
+ * from its own wrappers in approvals.audit.ts.
+ *
+ * Self-registers on import (the tree's observer idiom) — imported once from
+ * the audit block in src/index.ts.
+ */
+import { emitAuditEvent } from '../../audit/emit.js';
+import { channelOriginForUser, humanOrSystemActor } from '../../audit/vocab.js';
+// Direct file import (not the approvals barrel) to keep the graph tight.
+import { type ApprovalResolvedEvent, registerApprovalResolvedHandler } from './primitive.js';
+import { auditActionForApproval, resourcesForApproval } from './approvals.audit.js';
+
+export function onApprovalResolved(event: ApprovalResolvedEvent): void {
+  emitAuditEvent(() => {
+    const payload = safeParse(event.approval.payload);
+    return {
+      // '' resolver = sweep/timer (e.g. the awaiting-reason ghost sweep) → system.
+      actor: humanOrSystemActor(event.userId),
+      // Decisions are card clicks on a chat platform, even system-finalized
+      // ones — the card lifecycle is the surface.
+      origin: channelOriginForUser(event.userId),
+      action: 'approvals.decide',
+      resources: [
+        ...resourcesForApproval(event.approval.action, payload, event.session),
+        { type: 'approval', id: event.approval.approval_id },
+      ],
+      outcome: event.outcome === 'approve' ? 'approved' : 'rejected',
+      correlationId: event.approval.approval_id,
+      details: {
+        gated_action: auditActionForApproval(event.approval.action, payload),
+        requested_by: event.session.agent_group_id,
+      },
+    };
+  });
+}
+
+function safeParse(json: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+    // eslint-disable-next-line no-catch-all/no-catch-all -- stored payloads are untrusted; a malformed one must not break the decision event
+  } catch {
+    return {};
+  }
+}
+
+registerApprovalResolvedHandler(onApprovalResolved);
