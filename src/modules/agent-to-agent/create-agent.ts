@@ -112,6 +112,11 @@ export const applyCreateAgent: ApprovalHandler = async ({ session, payload, noti
   await performCreateAgent(name, instructions, session, sourceGroup, notify);
 };
 
+/** What creation did — the created group's ids on success, the reason on failure. */
+export type CreateAgentResult =
+  | { ok: true; agentGroupId: string; name: string; localName: string; folder: string }
+  | { ok: false; reason: string };
+
 /**
  * Core creation: writes the new agent group + bidirectional destinations and
  * scaffolds its filesystem, then reports via `notify`. Authorization is the
@@ -126,13 +131,13 @@ async function performCreateAgent(
   session: Session,
   sourceGroup: AgentGroup,
   notify: (text: string) => void,
-): Promise<void> {
+): Promise<CreateAgentResult> {
   const localName = normalizeName(name);
 
   // Collision in the creator's destination namespace
   if (getDestinationByName(sourceGroup.id, localName)) {
     notify(`Cannot create agent "${name}": you already have a destination named "${localName}".`);
-    return;
+    return { ok: false, reason: 'destination name collision' };
   }
 
   // Derive a safe folder name, deduplicated globally across agent_groups.folder
@@ -149,7 +154,7 @@ async function performCreateAgent(
   if (!resolvedPath.startsWith(resolvedGroupsDir + path.sep)) {
     notify(`Cannot create agent "${name}": invalid folder path.`);
     log.error('create_agent path traversal attempt', { folder, resolvedPath });
-    return;
+    return { ok: false, reason: 'invalid folder path' };
   }
 
   const agentGroupId = `ag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -208,4 +213,5 @@ async function performCreateAgent(
 
   notify(`Agent "${localName}" created. You can now message it with <message to="${localName}">...</message>.`);
   log.info('Agent group created', { agentGroupId, name, localName, folder, parent: sourceGroup.id });
+  return { ok: true, agentGroupId, name, localName, folder };
 }

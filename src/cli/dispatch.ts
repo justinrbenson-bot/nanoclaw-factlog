@@ -12,11 +12,27 @@ import { getSession } from '../db/sessions.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
 import type { CallerContext, ErrorCode, RequestFrame, ResponseFrame } from './frame.js';
 import { getResource } from './crud.js';
-import { lookup } from './registry.js';
+import { type CommandDef, lookup } from './registry.js';
 
-type DispatchOptions = {
+/**
+ * Resolution out-param for middleware that wraps dispatch: dispatch reassigns
+ * `req` internally (dash-joined id fallback, group-scope auto-fill), so a
+ * wrapper can't see the resolved command or effective args on the frame it
+ * passed in.
+ */
+export type DispatchTrace = {
+  cmd?: CommandDef;
+  command?: string;
+  args?: Record<string, unknown>;
+};
+
+export type DispatchOptions = {
   /** True when a command is being replayed after approval. */
   approved?: boolean;
+  /** Id of the approval that authorized this replay — correlation for middleware/observers. */
+  approvalId?: string;
+  /** Filled by dispatch with the resolved command + effective args. */
+  trace?: DispatchTrace;
 };
 
 export async function dispatch(
@@ -46,6 +62,12 @@ export async function dispatch(
         break;
       }
     }
+  }
+
+  if (opts.trace) {
+    opts.trace.cmd = cmd;
+    opts.trace.command = req.command;
+    opts.trace.args = req.args;
   }
 
   if (!cmd) {
@@ -102,6 +124,7 @@ export async function dispatch(
         fill.id = req.args.id ?? ctx.agentGroupId;
       }
       req = { ...req, args: { ...req.args, ...fill } };
+      if (opts.trace) opts.trace.args = req.args;
 
       // Fail-closed pre-handler check for sessions-get: returns "not found"
       // regardless of whether the UUID exists in another group, preventing an
@@ -192,10 +215,12 @@ export async function dispatch(
   }
 }
 
-registerApprovalHandler('cli_command', async ({ payload, notify }) => {
+registerApprovalHandler('cli_command', async ({ payload, notify, approvalId }) => {
   const frame = payload.frame as RequestFrame;
   const callerContext = parseCallerContext(payload.callerContext) ?? { caller: 'host' };
-  const response = await dispatch(frame, callerContext, { approved: true });
+  // approvalId rides opts so middleware/observers around dispatch can
+  // correlate the replay with the approval that authorized it.
+  const response = await dispatch(frame, callerContext, { approved: true, approvalId });
 
   if (response.ok) {
     const data = typeof response.data === 'string' ? response.data : JSON.stringify(response.data, null, 2);

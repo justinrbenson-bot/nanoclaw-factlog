@@ -165,6 +165,7 @@ describe('agent message policies', () => {
     await applyA2aMessageGate({
       session: SA,
       userId: 'slack:dana',
+      approvalId: 'appr-test',
       notify,
       payload: { id: 'held-1', platform_id: B, content: JSON.stringify({ text: 'approved!' }), in_reply_to: null },
     });

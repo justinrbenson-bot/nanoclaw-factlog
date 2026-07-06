@@ -209,6 +209,22 @@ setSenderScopeGate(
 );
 
 /**
+ * What a sender-approval card click decided — who was allowed/denied into
+ * which group, and which admin decided. The response registry consumes only
+ * `claimed`; the decision descriptor is for observers composed around the
+ * handler (and for tests).
+ */
+export interface SenderDecision {
+  approved: boolean;
+  senderIdentity: string;
+  agentGroupId: string;
+  messagingGroupId: string;
+  approverId: string;
+  channelType: string;
+}
+export type SenderApprovalResult = { claimed: boolean; decision?: SenderDecision };
+
+/**
  * Response handler for the unknown-sender approval card.
  *
  * Claim rule: questionId matches a row in pending_sender_approvals. If no
@@ -222,9 +238,9 @@ setSenderScopeGate(
  * Deny: delete the row (no "deny list" — a future message re-triggers a
  * fresh card per ACTION-ITEMS item 5 "no denial persistence").
  */
-async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<boolean> {
+async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<SenderApprovalResult> {
   const row = getPendingSenderApproval(payload.questionId);
-  if (!row) return false;
+  if (!row) return { claimed: false };
 
   // payload.userId is the raw platform userId (e.g. "6037840640"); namespace it
   // with the channel type so it matches users(id) format. Some platforms
@@ -243,10 +259,18 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<b
       clickerId,
       expectedApprover: row.approver_user_id,
     });
-    return true; // claim the response so it's not unclaimed-logged, but do nothing
+    return { claimed: true }; // claim the response so it's not unclaimed-logged, but do nothing
   }
   const approverId = clickerId;
   const approved = payload.value === 'approve';
+  const decision = {
+    approved,
+    senderIdentity: row.sender_identity,
+    agentGroupId: row.agent_group_id,
+    messagingGroupId: row.messaging_group_id,
+    approverId,
+    channelType: payload.channelType,
+  };
 
   if (approved) {
     addMember({
@@ -272,7 +296,7 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<b
     } catch (err) {
       log.error('Failed to replay message after sender approval', { approvalId: row.id, err });
     }
-    return true;
+    return { claimed: true, decision };
   }
 
   log.info('Unknown sender denied', {
@@ -282,16 +306,33 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<b
     approverId,
   });
   deletePendingSenderApproval(row.id);
-  return true;
+  return { claimed: true, decision };
 }
 
-registerResponseHandler(handleSenderApprovalResponse);
+registerResponseHandler(async (payload) => (await handleSenderApprovalResponse(payload)).claimed);
 
 // ── Unknown-channel registration flow ──
 
 setChannelRequestGate(async (mg, event) => {
   await requestChannelApproval({ messagingGroupId: mg.id, event });
 });
+
+/**
+ * What a channel-registration flow decided: connected (to which agent group,
+ * created or existing), rejected, or failed — and which admin drove it. Like
+ * SenderDecision, the registry consumes only `claimed`.
+ */
+export interface ChannelDecision {
+  kind: 'connected' | 'rejected' | 'failed';
+  messagingGroupId: string;
+  approverId: string;
+  channelType?: string;
+  agentGroupId?: string;
+  createdAgentGroup?: boolean;
+  agentName?: string;
+  reason?: string;
+}
+export type ChannelApprovalResult = { claimed: boolean; decision?: ChannelDecision };
 
 /**
  * Response handler for the unknown-channel registration card.
@@ -307,9 +348,9 @@ setChannelRequestGate(async (mg, event) => {
  *                     captures the reply and creates immediately)
  *   reject          — set denied_at, delete pending row
  */
-async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<boolean> {
+async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<ChannelApprovalResult> {
   const row = getPendingChannelApproval(payload.questionId);
-  if (!row) return false;
+  if (!row) return { claimed: false };
 
   const clickerId = payload.userId
     ? payload.userId.includes(':')
@@ -324,9 +365,14 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       clickerId,
       expectedApprover: row.approver_user_id,
     });
-    return true;
+    return { claimed: true };
   }
   const approverId = clickerId;
+  const decisionBase = {
+    messagingGroupId: row.messaging_group_id,
+    approverId,
+    channelType: payload.channelType,
+  };
 
   // ── Reject / Cancel ──
   if (payload.value === REJECT_VALUE) {
@@ -336,7 +382,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       messagingGroupId: row.messaging_group_id,
       approverId,
     });
-    return true;
+    return { claimed: true, decision: { kind: 'rejected', ...decisionBase } };
   }
 
   // ── Choose existing agent — send agent-selection follow-up card ──
@@ -347,11 +393,11 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         messagingGroupId: row.messaging_group_id,
         approverUserId: row.approver_user_id,
       });
-      return true;
+      return { claimed: true };
     }
 
     const adapter = getDeliveryAdapter();
-    if (!adapter) return true;
+    if (!adapter) return { claimed: true };
 
     const agentGroups = getAllAgentGroups();
     const options = buildAgentSelectionOptions(agentGroups, approverId);
@@ -378,7 +424,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         err,
       });
     }
-    return true;
+    return { claimed: true };
   }
 
   // ── Create new agent — prompt for free-text name ──
@@ -389,7 +435,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         messagingGroupId: row.messaging_group_id,
         approverUserId: row.approver_user_id,
       });
-      return true;
+      return { claimed: true };
     }
 
     const adapter = getDeliveryAdapter();
@@ -397,7 +443,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       log.error('Channel registration: no delivery adapter for name prompt', {
         messagingGroupId: row.messaging_group_id,
       });
-      return true;
+      return { claimed: true };
     }
 
     awaitingNameInput.set(row.approver_user_id, {
@@ -421,7 +467,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       });
       awaitingNameInput.delete(row.approver_user_id);
     }
-    return true;
+    return { claimed: true };
   }
 
   // ── Resolve target agent group (connect to existing or create new) ──
@@ -436,7 +482,10 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         targetAgentGroupId,
       });
       deletePendingChannelApproval(row.messaging_group_id);
-      return true;
+      return {
+        claimed: true,
+        decision: { kind: 'failed', reason: 'target agent group no longer exists', ...decisionBase },
+      };
     }
     if (!hasAdminPrivilege(approverId, targetAgentGroupId)) {
       log.warn('Channel registration: target agent group rejected for unauthorized approver', {
@@ -444,14 +493,14 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         targetAgentGroupId,
         approverId,
       });
-      return true;
+      return { claimed: true };
     }
   } else {
     log.warn('Channel registration: unknown response value', {
       messagingGroupId: row.messaging_group_id,
       value: payload.value,
     });
-    return true;
+    return { claimed: true };
   }
 
   // ── Wire + replay (shared path for connect and create) ──
@@ -464,7 +513,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       err,
     });
     deletePendingChannelApproval(row.messaging_group_id);
-    return true;
+    return { claimed: true, decision: { kind: 'failed', reason: 'failed to parse stored event', ...decisionBase } };
   }
 
   const isGroup = event.threadId !== null;
@@ -512,22 +561,26 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       err,
     });
   }
-  return true;
+  return {
+    claimed: true,
+    decision: { kind: 'connected', agentGroupId: targetAgentGroupId, createdAgentGroup: false, ...decisionBase },
+  };
 }
 
-registerResponseHandler(handleChannelApprovalResponse);
+registerResponseHandler(async (payload) => (await handleChannelApprovalResponse(payload)).claimed);
 
 // ── Free-text name interceptor ──
 // Captures the next DM from an approver who clicked "Create new agent",
 // creates the agent immediately, wires the channel, and replays.
 
-registerMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
+async function channelNameInterceptor(event: InboundEvent): Promise<ChannelApprovalResult> {
   const userId = extractAndUpsertUser(event);
-  if (!userId) return false;
+  if (!userId) return { claimed: false };
 
   const pending = awaitingNameInput.get(userId);
-  if (!pending) return false;
-  if (event.channelType !== pending.dmChannelType || event.platformId !== pending.dmPlatformId) return false;
+  if (!pending) return { claimed: false };
+  if (event.channelType !== pending.dmChannelType || event.platformId !== pending.dmPlatformId)
+    return { claimed: false };
 
   awaitingNameInput.delete(userId);
 
@@ -541,11 +594,11 @@ registerMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
 
   if (!text) {
     log.warn('Channel registration: empty name reply, ignoring', { userId });
-    return true;
+    return { claimed: true };
   }
 
   const row = getPendingChannelApproval(pending.channelMgId);
-  if (!row) return true;
+  if (!row) return { claimed: true };
 
   const ag = createNewAgentGroup(text);
   log.info('Channel registration: new agent group created', {
@@ -554,6 +607,14 @@ registerMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
     agentName: ag.name,
     folder: ag.folder,
   });
+  const decisionBase = {
+    messagingGroupId: row.messaging_group_id,
+    approverId: userId,
+    channelType: event.channelType,
+    agentGroupId: ag.id,
+    createdAgentGroup: true,
+    agentName: ag.name,
+  };
 
   let originalEvent: InboundEvent;
   try {
@@ -564,7 +625,8 @@ registerMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
       err,
     });
     deletePendingChannelApproval(row.messaging_group_id);
-    return true;
+    // The group WAS created above — the decision descriptor must say so.
+    return { claimed: true, decision: { kind: 'failed', reason: 'failed to parse stored event', ...decisionBase } };
   }
 
   const isGroup = originalEvent.threadId !== null;
@@ -628,5 +690,7 @@ registerMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
         .catch(() => {});
     }
   }
-  return true;
-});
+  return { claimed: true, decision: { kind: 'connected', ...decisionBase } };
+}
+
+registerMessageInterceptor(async (event) => (await channelNameInterceptor(event)).claimed);

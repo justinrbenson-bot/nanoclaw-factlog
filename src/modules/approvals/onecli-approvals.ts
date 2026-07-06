@@ -64,8 +64,12 @@ function shortApprovalId(): string {
   return `oa-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** Called from the approvals response handler when a card button is clicked. */
-export function resolveOneCLIApproval(approvalId: string, selectedOption: string): boolean {
+/**
+ * Called from the approvals response handler when a card button is clicked.
+ * `userId` is the namespaced id of the clicking admin — the resolution's
+ * identity, recorded here (empty when the resolver is a timer/sweep).
+ */
+export function resolveOneCLIApproval(approvalId: string, selectedOption: string, userId: string): boolean {
   const state = pending.get(approvalId);
   if (!state) return false;
   pending.delete(approvalId);
@@ -78,7 +82,7 @@ export function resolveOneCLIApproval(approvalId: string, selectedOption: string
   deletePendingApproval(approvalId);
 
   state.resolve(decision);
-  log.info('OneCLI approval resolved', { approvalId, decision });
+  log.info('OneCLI approval resolved', { approvalId, decision, decidedBy: userId || 'system' });
   return true;
 }
 
