@@ -52,9 +52,13 @@ import { getDeliveryAdapter } from '../../delivery.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { log } from '../../log.js';
 import type { InboundEvent } from '../../channels/adapter.js';
-import type { AgentGroup } from '../../types.js';
+import type { AgentGroup, PendingApproval } from '../../types.js';
 import { pickApprovalDelivery, pickApprover } from '../approvals/primitive.js';
-import { createPendingChannelApproval, hasInFlightChannelApproval } from './db/pending-channel-approvals.js';
+import {
+  createPendingChannelApproval,
+  hasInFlightChannelApproval,
+  type PendingChannelApproval,
+} from './db/pending-channel-approvals.js';
 import { hasAdminPrivilege } from './db/user-roles.js';
 
 // ── Value constants (response handler in index.ts parses these) ──
@@ -152,15 +156,14 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
     });
     return;
   }
-  // Use first agent group for approver resolution — owners and global admins
-  // are returned regardless of which group we pass.
-  const referenceGroup = agentGroups[0];
 
-  const approvers = pickApprover(referenceGroup.id);
+  // Registration creates groups and wirings — global blast radius, so the
+  // approver comes from the global chain (global admins → owners), never from
+  // whichever agent group happens to sort first.
+  const approvers = pickApprover(null);
   if (approvers.length === 0) {
-    log.warn('Channel registration skipped — no owner or admin configured', {
+    log.warn('Channel registration skipped — no owner or global admin configured', {
       messagingGroupId,
-      targetAgentGroupId: referenceGroup.id,
     });
     return;
   }
@@ -188,7 +191,6 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
   if (!delivery) {
     log.warn('Channel registration skipped — no DM channel for any approver', {
       messagingGroupId,
-      targetAgentGroupId: referenceGroup.id,
     });
     return;
   }
@@ -208,9 +210,11 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
   const question = buildQuestionText(isGroup, senderName, channelName, originChannelType);
   const options = normalizeOptions(buildApprovalOptions(agentGroups, delivery.userId));
 
+  // agent_group_id is NOT NULL bookkeeping (the schema predates the global
+  // approver chain); it no longer drives approver resolution or click-auth.
   createPendingChannelApproval({
     messaging_group_id: messagingGroupId,
-    agent_group_id: referenceGroup.id,
+    agent_group_id: agentGroups[0].id,
     original_message: JSON.stringify(event),
     approver_user_id: delivery.userId,
     created_at: new Date().toISOString(),
@@ -269,6 +273,38 @@ export function buildAgentSelectionOptions(
     value: REJECT_VALUE,
   });
   return normalizeOptions(options);
+}
+
+/**
+ * The channel-registration hold as a hold-record view (the shape
+ * pending_approvals rows have), so its terminal resolutions can announce
+ * through the shared approval-resolved observer. The flow itself keeps its
+ * own table and multi-step conversation.
+ */
+export function channelHoldView(
+  row: PendingChannelApproval,
+  payloadExtra: Record<string, unknown> = {},
+): PendingApproval {
+  return {
+    approval_id: row.messaging_group_id,
+    session_id: null,
+    request_id: row.messaging_group_id,
+    action: 'channel_registration',
+    payload: JSON.stringify({ messagingGroupId: row.messaging_group_id, ...payloadExtra }),
+    created_at: row.created_at,
+    agent_group_id: null,
+    channel_type: null,
+    platform_id: null,
+    platform_message_id: null,
+    expires_at: null,
+    status: 'pending',
+    title: row.title,
+    options_json: row.options_json,
+    approver_user_id: row.approver_user_id,
+    eligibility: 'admins-of-scope',
+    approver_scope: 'group',
+    dedup_key: null,
+  };
 }
 
 /**

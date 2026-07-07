@@ -358,7 +358,7 @@ describe('unknown-channel registration flow', () => {
     expect(stillPending).toBe(1);
   });
 
-  it('does not let a scoped admin connect an unknown channel to another agent group', async () => {
+  it('does not let a scoped admin drive channel registration at all (D4: owner/global-admin eligibility)', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
     const { getDb } = await import('../../db/connection.js');
@@ -395,39 +395,28 @@ describe('unknown-channel registration flow', () => {
       messaging_group_id: string;
     };
     expect(pending).toBeDefined();
+    // Registration creates groups/wirings — the card goes to the global chain
+    // (the owner's DM), never to a scoped admin, even though one exists.
     expect(deliverMock).toHaveBeenCalledTimes(1);
-    expect(deliverMock.mock.calls[0][1]).toBe('dm-scoped-admin');
+    expect(deliverMock.mock.calls[0][1]).toBe('dm-owner');
 
-    for (const handler of getResponseHandlers()) {
-      const claimed = await handler({
-        questionId: pending.messaging_group_id,
-        value: 'choose_existing',
-        userId: 'scoped-admin',
-        channelType: 'telegram',
-        platformId: 'dm-scoped-admin',
-        threadId: null,
-      });
-      if (claimed) break;
+    // A scoped admin's clicks are ignored outright — no follow-up card, no
+    // wiring, and the pending row stays for a real approver.
+    for (const value of ['choose_existing', 'connect:ag-2', `connect:ag-1`]) {
+      for (const handler of getResponseHandlers()) {
+        const claimed = await handler({
+          questionId: pending.messaging_group_id,
+          value,
+          userId: 'scoped-admin',
+          channelType: 'telegram',
+          platformId: 'dm-scoped-admin',
+          threadId: null,
+        });
+        if (claimed) break;
+      }
     }
 
-    const followupPayload = JSON.parse(deliverMock.mock.calls[1][4] as string) as {
-      options: Array<{ label: string; value: string }>;
-    };
-    expect(followupPayload.options.map((option) => option.value)).toContain('connect:ag-1');
-    expect(followupPayload.options.map((option) => option.value)).not.toContain('connect:ag-2');
-
-    for (const handler of getResponseHandlers()) {
-      const claimed = await handler({
-        questionId: pending.messaging_group_id,
-        value: 'connect:ag-2',
-        userId: 'scoped-admin',
-        channelType: 'telegram',
-        platformId: 'dm-scoped-admin',
-        threadId: null,
-      });
-      if (claimed) break;
-    }
-
+    expect(deliverMock).toHaveBeenCalledTimes(1); // no follow-up card was sent
     const mgaCount = (
       getDb()
         .prepare('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?')

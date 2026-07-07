@@ -12,12 +12,36 @@ import { getSession } from '../db/sessions.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
 import type { CallerContext, ErrorCode, RequestFrame, ResponseFrame } from './frame.js';
 import { getResource } from './crud.js';
-import { lookup } from './registry.js';
+import { lookup, type CommandDef } from './registry.js';
 
 type DispatchOptions = {
   /** True when a command is being replayed after approval. */
   approved?: boolean;
 };
+
+/**
+ * Resources reachable under `cli_scope: 'group'` — and, because their rows
+ * anchor to one agent group, the resources whose held mutations have
+ * group-local blast radius.
+ */
+const GROUP_SCOPED_RESOURCES = new Set(['groups', 'sessions', 'destinations', 'members']);
+
+/**
+ * Blast radius of a held command, for approver eligibility (D1): a mutation
+ * of a non-group-scoped resource (roles, users, wirings, messaging-groups,
+ * policies) — or one explicitly targeting another agent group — needs an
+ * owner or global admin to approve; a scoped admin's click is rejected.
+ */
+function approverScopeFor(
+  cmd: CommandDef,
+  args: Record<string, unknown>,
+  callerAgentGroupId: string,
+): 'group' | 'global' {
+  if (!cmd.resource || !GROUP_SCOPED_RESOURCES.has(cmd.resource)) return 'global';
+  const groupRefs = [args.agent_group_id, args.group];
+  if (cmd.resource === 'groups' || cmd.resource === 'destinations') groupRefs.push(args.id);
+  return groupRefs.some((v) => v !== undefined && v !== callerAgentGroupId) ? 'global' : 'group';
+}
 
 export async function dispatch(
   req: RequestFrame,
@@ -62,9 +86,8 @@ export async function dispatch(
     }
 
     if (cliScope === 'group') {
-      const allowed = new Set(['groups', 'sessions', 'destinations', 'members']);
       // Only allow whitelisted resources and general commands (no resource, like help)
-      if (cmd.resource && !allowed.has(cmd.resource)) {
+      if (cmd.resource && !GROUP_SCOPED_RESOURCES.has(cmd.resource)) {
         return err(req.id, 'forbidden', `CLI access is scoped to this agent group. Cannot access "${cmd.resource}".`);
       }
 
@@ -134,6 +157,7 @@ export async function dispatch(
       payload: { frame: { id: req.id, command: req.command, args: req.args }, callerContext: ctx },
       title: `CLI: ${req.command}`,
       question: `Agent "${agentName}" wants to run:\n\`ncl ${req.command}${argSummary ? ' ' + argSummary : ''}\``,
+      approverScope: approverScopeFor(cmd, req.args, ctx.agentGroupId),
     });
 
     return err(req.id, 'approval-pending', 'Approval request sent to admin. You will be notified of the result.');

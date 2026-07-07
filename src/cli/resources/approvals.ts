@@ -48,6 +48,24 @@ registerResource({
     },
     { name: 'title', type: 'string', description: 'Card title shown to the admin.' },
     { name: 'options_json', type: 'json', description: 'Card button options as JSON array.' },
+    {
+      name: 'approver_user_id',
+      type: 'string',
+      description: 'Named approver (exclusive) or the admin the card was delivered to (admins-of-scope).',
+    },
+    {
+      name: 'eligibility',
+      type: 'string',
+      description: 'Who may resolve: only the named approver, or the admin chain of the anchoring group.',
+      enum: ['exclusive', 'admins-of-scope'],
+    },
+    {
+      name: 'approver_scope',
+      type: 'string',
+      description: "Blast radius: 'global' holds require an owner or global admin to resolve.",
+      enum: ['group', 'global'],
+    },
+    { name: 'dedup_key', type: 'string', description: 'In-flight dedup key (e.g. sender admission per chat+sender).' },
   ],
   operations: { list: 'open', get: 'open' },
 });

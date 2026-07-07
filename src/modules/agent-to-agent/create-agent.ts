@@ -94,6 +94,10 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
  * a confined (non-global) agent group. `session` is the requesting parent.
  */
 export const applyCreateAgent: ApprovalHandler = async ({ session, payload, notify }) => {
+  if (!session) {
+    log.warn('create_agent approval resolved without a session — dropping');
+    return;
+  }
   const name = typeof payload.name === 'string' ? payload.name : '';
   const instructions = typeof payload.instructions === 'string' ? payload.instructions : null;
 

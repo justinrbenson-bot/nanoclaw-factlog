@@ -23,7 +23,7 @@
  */
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { createPendingApproval, getSession } from '../../db/sessions.js';
+import { createPendingApproval, getPendingApprovalByDedupKey, getSession } from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
@@ -57,11 +57,12 @@ const APPROVAL_OPTIONS: RawOption[] = [
 // their `requestApproval()` calls.
 
 export interface ApprovalHandlerContext {
-  session: Session;
+  /** Requesting agent's session. Null for sessionless holds (e.g. sender admission). */
+  session: Session | null;
   payload: Record<string, unknown>;
   /** User ID of the admin who approved. Empty string if unknown. */
   userId: string;
-  /** Send a system chat message to the requesting agent's session. */
+  /** Send a system chat message to the requesting agent's session. No-op when sessionless. */
   notify: (text: string) => void;
 }
 
@@ -88,14 +89,20 @@ export function getApprovalHandler(action: string): ApprovalHandler | undefined 
 // out. Callback errors are logged and isolated; they never block resolution.
 //
 // Only authorized clicks resolve an approval (the response handler's
-// isAuthorizedApprovalClick gate runs first), so callbacks never fire for
-// unauthorized responses.
+// mayResolve gate runs first), so callbacks never fire for unauthorized
+// responses. Non-click resolutions (OneCLI expiry timers, the boot sweep)
+// announce here too, with outcome 'expire' / 'sweep'.
 
 export interface ApprovalResolvedEvent {
+  /**
+   * The resolved hold. For holds that live outside pending_approvals
+   * (channel registration) this is a synthesized view of the same shape.
+   */
   approval: PendingApproval;
-  session: Session;
-  outcome: 'approve' | 'reject';
-  /** Namespaced user ID (`<channel>:<handle>`) of the resolving admin. Empty string if unknown. */
+  /** Requesting agent's session; null for sessionless holds (sender admission, OneCLI, channel registration). */
+  session: Session | null;
+  outcome: 'approve' | 'reject' | 'expire' | 'sweep';
+  /** Namespaced user ID (`<channel>:<handle>`) of the resolving admin. Empty string if unknown (expiry/sweep). */
   userId: string;
 }
 
@@ -200,7 +207,14 @@ export function notifyAgent(session: Session, text: string): void {
 }
 
 export interface RequestApprovalOptions {
-  session: Session;
+  /**
+   * Requesting agent's session. Omit for sessionless holds (e.g. sender
+   * admission) — failure notices are then logged instead of chat-relayed,
+   * and the hold anchors to `agentGroupId`.
+   */
+  session?: Session;
+  /** Eligibility anchor when there is no session. Ignored when `session` is set (its agent group wins). */
+  agentGroupId?: string;
   agentName: string;
   /** Free-form action identifier. Must match the key the consumer registered via registerApprovalHandler. */
   action: string;
@@ -210,8 +224,32 @@ export interface RequestApprovalOptions {
   title: string;
   /** Card body shown to the admin. */
   question: string;
-  /** Deliver the card to this specific user instead of all of the session group's admins. */
+  /**
+   * Deliver the card to this specific user AND make the hold exclusively
+   * theirs to resolve (eligibility 'exclusive' — an a2a policy's approver).
+   */
   approverUserId?: string;
+  /**
+   * The action's blast radius. 'global' holds (privilege grants, cross-group
+   * writes) can only be resolved by an owner or global admin. Default 'group'.
+   */
+  approverScope?: 'group' | 'global';
+  /** Card buttons. Default: Approve / Reject / Reject with reason…. */
+  options?: RawOption[];
+  /**
+   * In-flight dedup: while a pending row carries this key, a repeat request
+   * with the same key is dropped without a second card.
+   */
+  dedupKey?: string;
+  /**
+   * Record the user the card is delivered to on the hold, letting them
+   * resolve it alongside the scope's admins even if their role changes
+   * mid-flight (the sender/channel "named-or-admin" semantic). Off by
+   * default — module holds authorize purely by the admin chain.
+   */
+  recordDeliveredApprover?: boolean;
+  /** Channel preference for the approver-DM walk when there is no session to derive it from. */
+  originChannelType?: string;
 }
 
 /**
@@ -221,36 +259,52 @@ export interface RequestApprovalOptions {
  * approval handler for this action via the response dispatcher.
  */
 export async function requestApproval(opts: RequestApprovalOptions): Promise<void> {
-  const { session, action, payload, title, question, agentName, approverUserId } = opts;
+  const { session, action, payload, title, question, agentName, approverUserId, dedupKey } = opts;
 
-  const approvers = approverUserId ? [approverUserId] : pickApprover(session.agent_group_id);
-  if (approvers.length === 0) {
-    notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
+  const agentGroupId = session?.agent_group_id ?? opts.agentGroupId ?? null;
+
+  const fail = (text: string): void => {
+    if (session) notifyAgent(session, `${action} failed: ${text}`);
+    else log.warn('Approval request failed', { action, agentGroupId, reason: text });
+  };
+
+  if (dedupKey && getPendingApprovalByDedupKey(dedupKey)) {
+    log.debug('Approval request already in flight — dropping duplicate', { action, dedupKey });
     return;
   }
 
-  const originChannelType = session.messaging_group_id
-    ? (getMessagingGroup(session.messaging_group_id)?.channel_type ?? '')
-    : '';
+  const approvers = approverUserId ? [approverUserId] : pickApprover(agentGroupId);
+  if (approvers.length === 0) {
+    fail('no owner or admin configured to approve.');
+    return;
+  }
+
+  const originChannelType =
+    opts.originChannelType ??
+    (session?.messaging_group_id ? (getMessagingGroup(session.messaging_group_id)?.channel_type ?? '') : '');
 
   const target = await pickApprovalDelivery(approvers, originChannelType);
   if (!target) {
-    notifyAgent(session, `${action} failed: no DM channel found for any eligible approver.`);
+    fail('no DM channel found for any eligible approver.');
     return;
   }
 
   const approvalId = `appr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const normalizedOptions = normalizeOptions(APPROVAL_OPTIONS);
+  const cardOptions = opts.options ?? APPROVAL_OPTIONS;
   createPendingApproval({
     approval_id: approvalId,
-    session_id: session.id,
+    session_id: session?.id ?? null,
     request_id: approvalId,
     action,
     payload: JSON.stringify(payload),
     created_at: new Date().toISOString(),
+    agent_group_id: agentGroupId,
     title,
-    options_json: JSON.stringify(normalizedOptions),
-    approver_user_id: approverUserId ?? null,
+    options_json: JSON.stringify(normalizeOptions(cardOptions)),
+    approver_user_id: approverUserId ?? (opts.recordDeliveredApprover ? target.userId : null),
+    eligibility: approverUserId ? 'exclusive' : 'admins-of-scope',
+    approver_scope: opts.approverScope ?? 'group',
+    dedup_key: dedupKey ?? null,
   });
 
   const adapter = getDeliveryAdapter();
@@ -266,12 +320,12 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
           questionId: approvalId,
           title,
           question,
-          options: APPROVAL_OPTIONS,
+          options: cardOptions,
         }),
       );
     } catch (err) {
       log.error('Failed to deliver approval card', { action, approvalId, err });
-      notifyAgent(session, `${action} failed: could not deliver approval request to ${target.userId}.`);
+      fail(`could not deliver approval request to ${target.userId}.`);
       return;
     }
   }

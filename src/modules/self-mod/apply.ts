@@ -20,6 +20,10 @@ import { writeSessionMessage } from '../../session-manager.js';
 import type { ApprovalHandler } from '../approvals/index.js';
 
 export const applyInstallPackages: ApprovalHandler = async ({ session, payload, userId, notify }) => {
+  if (!session) {
+    log.warn('install_packages approval resolved without a session — dropping');
+    return;
+  }
   const agentGroup = getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
     notify('install_packages approved but agent group missing.');
@@ -83,6 +87,10 @@ export const applyInstallPackages: ApprovalHandler = async ({ session, payload, 
 };
 
 export const applyAddMcpServer: ApprovalHandler = async ({ session, payload, userId, notify }) => {
+  if (!session) {
+    log.warn('add_mcp_server approval resolved without a session — dropping');
+    return;
+  }
   const agentGroup = getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
     notify('add_mcp_server approved but agent group missing.');

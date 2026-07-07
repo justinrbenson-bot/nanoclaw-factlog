@@ -100,7 +100,7 @@ describe('approval-resolved callbacks', () => {
     expect(events[0].outcome).toBe('reject');
     expect(events[0].approval.approval_id).toBe('appr-reject-1');
     expect(events[0].approval.action).toBe('test_reject_action');
-    expect(events[0].session.id).toBe('sess-1');
+    expect(events[0].session?.id).toBe('sess-1');
     expect(events[0].userId).toBe('slack:admin-1');
   });
 
