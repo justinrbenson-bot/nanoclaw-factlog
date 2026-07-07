@@ -20,12 +20,13 @@ import {
   markDeliveryFailed,
   migrateDeliveredTable,
 } from './db/session-db.js';
+import { guard } from './guard/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
-import type { Session } from './types.js';
+import type { PendingApproval, Session } from './types.js';
 
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
@@ -393,14 +394,18 @@ async function deliverMessage(
  * Delivery action registry.
  *
  * Modules register handlers for system-kind outbound message actions via
- * `registerDeliveryAction`. Core checks the registry first in
- * `handleSystemAction` and falls through to the inline switch when no
- * handler is registered. The switch will shrink as modules are extracted
- * (scheduling, approvals, agent-to-agent) and eventually only its default
- * branch remains.
+ * `registerDeliveryAction`. Unknown actions log "Unknown system action".
  *
- * Default when no handler registered and the switch doesn't match: log
- * "Unknown system action" and return.
+ * Privileged delivery actions (create_agent, install_packages,
+ * add_mcp_server) register with a guard spec: the registry wraps the handler
+ * so the guard's decision — allow / hold / deny — stands between the
+ * container's outbound row and the handler body, and the wrapped path is the
+ * only path (the raw handler is never stored). On approve, the continuation
+ * re-enters the same wrapped entry carrying the approval row as its grant
+ * (`reenterGuardedDeliveryAction`), so the structural baseline is re-checked
+ * live. Plain actions (scheduling self-actions, the cli_request bridge — its
+ * inner commands are guarded at dispatch) register without a spec and are
+ * not catalog actions.
  */
 export type DeliveryActionHandler = (
   content: Record<string, unknown>,
@@ -408,18 +413,105 @@ export type DeliveryActionHandler = (
   inDb: Database.Database,
 ) => Promise<void>;
 
-const actionHandlers = new Map<string, DeliveryActionHandler>();
+/** Handler shape for guard-wrapped actions — must not touch inDb (replays run without one). */
+export type GuardedDeliveryHandler = (content: Record<string, unknown>, session: Session) => Promise<void>;
 
-export function registerDeliveryAction(action: string, handler: DeliveryActionHandler): void {
+export interface DeliveryGuardSpec {
+  /** Dotted guard-catalog action consulted before the handler runs. */
+  guardAction: string;
+  /**
+   * Domain validation that runs before the guard — malformed requests are
+   * answered (notify) without ever creating a hold. Return false to stop.
+   */
+  precheck?: (content: Record<string, unknown>, session: Session) => boolean | Promise<boolean>;
+  /** Create the hold (the domain's requestApproval call — card text lives with the domain). */
+  requestHold: (content: Record<string, unknown>, session: Session) => Promise<void>;
+  /** Tell the requester about a deny. */
+  onDeny?: (content: Record<string, unknown>, session: Session, reason: string) => void;
+}
+
+const actionHandlers = new Map<string, DeliveryActionHandler>();
+const guardedActions = new Map<string, { spec: DeliveryGuardSpec; handler: GuardedDeliveryHandler }>();
+
+export function registerDeliveryAction(action: string, handler: DeliveryActionHandler): void;
+export function registerDeliveryAction(action: string, handler: GuardedDeliveryHandler, spec: DeliveryGuardSpec): void;
+export function registerDeliveryAction(
+  action: string,
+  handler: DeliveryActionHandler | GuardedDeliveryHandler,
+  spec?: DeliveryGuardSpec,
+): void {
   if (actionHandlers.has(action)) {
     log.warn('Delivery action handler overwritten', { action });
   }
-  actionHandlers.set(action, handler);
+  if (!spec) {
+    actionHandlers.set(action, handler as DeliveryActionHandler);
+    return;
+  }
+  guardedActions.set(action, { spec, handler: handler as GuardedDeliveryHandler });
+  actionHandlers.set(action, (content, session) => runGuardedDeliveryAction(action, content, session, null));
+}
+
+async function runGuardedDeliveryAction(
+  action: string,
+  content: Record<string, unknown>,
+  session: Session,
+  grant: PendingApproval | null,
+): Promise<void> {
+  const entry = guardedActions.get(action);
+  if (!entry) {
+    log.warn('Unknown guarded delivery action', { action });
+    return;
+  }
+  const { spec, handler } = entry;
+
+  if (spec.precheck && !(await spec.precheck(content, session))) return;
+
+  const decision = guard({
+    action: spec.guardAction,
+    actor: { kind: 'agent', agentGroupId: session.agent_group_id, sessionId: session.id },
+    payload: content,
+    grant,
+  });
+
+  if (decision.effect === 'deny') {
+    log.warn('Delivery action denied by guard', { action, reason: decision.reason });
+    spec.onDeny?.(content, session, decision.reason);
+    return;
+  }
+  if (decision.effect === 'hold') {
+    await spec.requestHold(content, session);
+    return;
+  }
+  await handler(content, session);
+}
+
+/**
+ * Approve continuation for a guard-wrapped delivery action: re-enter the
+ * wrapped entry with the approval row as the grant. The guard treats the
+ * grant as hold-satisfied but re-runs the structural baseline, so
+ * approve-then-revoke does not execute. Domains register this as their
+ * approval handler in the same line that registers the action.
+ */
+export function reenterGuardedDeliveryAction(action: string) {
+  return async (ctx: { session: Session | null; payload: Record<string, unknown>; approval: PendingApproval }) => {
+    if (!ctx.session) {
+      log.warn('Guarded delivery action approval resolved without a session — dropping', { action });
+      return;
+    }
+    await runGuardedDeliveryAction(action, ctx.payload, ctx.session, ctx.approval);
+  };
 }
 
 /** Look up a registered delivery-action handler. Lets module registrations be behavior-tested. */
 export function getDeliveryAction(action: string): DeliveryActionHandler | undefined {
   return actionHandlers.get(action);
+}
+
+/** Registered delivery actions with their guard mapping, for the conformance test. */
+export function listDeliveryActions(): { action: string; guardAction: string | null }[] {
+  return [...actionHandlers.keys()]
+    .sort()
+    .map((action) => ({ action, guardAction: guardedActions.get(action)?.spec.guardAction ?? null }));
 }
 
 /**

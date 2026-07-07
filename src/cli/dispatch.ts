@@ -3,44 +3,35 @@
  * the per-session DB poller (container caller) call dispatch() with the
  * same frame and a transport-supplied CallerContext.
  *
- * Approval gating for risky calls from the container is the only branch
- * that differs by caller. Host callers and `open` commands run inline.
+ * Every command passes the guard before its handler runs — the decision
+ * (allow / hold / deny) comes from the command's catalog entry, derived at
+ * registration (see cli/guard.ts). Dispatch keeps the mechanics: arg
+ * auto-fill, the sessions-get existence oracle, parseArgs, and post-handler
+ * row filtering. An approved replay re-enters here carrying the verified
+ * approval row as its grant — the guard re-checks the structural baseline
+ * live, and the `approved: true` boolean no longer exists.
  */
 import { getContainerConfig } from '../db/container-configs.js';
 import { getAgentGroup } from '../db/agent-groups.js';
 import { getSession } from '../db/sessions.js';
+import { guard, type GuardActor } from '../guard/index.js';
+import { log } from '../log.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
+import type { PendingApproval } from '../types.js';
 import type { CallerContext, ErrorCode, RequestFrame, ResponseFrame } from './frame.js';
 import { getResource } from './crud.js';
-import { lookup, type CommandDef } from './registry.js';
+import { commandGuardAction } from './guard.js';
+import { lookup } from './registry.js';
 
 type DispatchOptions = {
-  /** True when a command is being replayed after approval. */
-  approved?: boolean;
+  /** Verified approval row when a command is replayed after approval. */
+  grant?: PendingApproval;
 };
 
-/**
- * Resources reachable under `cli_scope: 'group'` — and, because their rows
- * anchor to one agent group, the resources whose held mutations have
- * group-local blast radius.
- */
-const GROUP_SCOPED_RESOURCES = new Set(['groups', 'sessions', 'destinations', 'members']);
-
-/**
- * Blast radius of a held command, for approver eligibility (D1): a mutation
- * of a non-group-scoped resource (roles, users, wirings, messaging-groups,
- * policies) — or one explicitly targeting another agent group — needs an
- * owner or global admin to approve; a scoped admin's click is rejected.
- */
-function approverScopeFor(
-  cmd: CommandDef,
-  args: Record<string, unknown>,
-  callerAgentGroupId: string,
-): 'group' | 'global' {
-  if (!cmd.resource || !GROUP_SCOPED_RESOURCES.has(cmd.resource)) return 'global';
-  const groupRefs = [args.agent_group_id, args.group];
-  if (cmd.resource === 'groups' || cmd.resource === 'destinations') groupRefs.push(args.id);
-  return groupRefs.some((v) => v !== undefined && v !== callerAgentGroupId) ? 'global' : 'group';
+function actorFor(ctx: CallerContext): GuardActor {
+  return ctx.caller === 'host'
+    ? { kind: 'host' }
+    : { kind: 'agent', agentGroupId: ctx.agentGroupId, sessionId: ctx.sessionId };
 }
 
 export async function dispatch(
@@ -76,43 +67,13 @@ export async function dispatch(
     return err(req.id, 'unknown-command', `no command "${req.command}"`);
   }
 
-  // CLI scope enforcement for agent callers
+  // Group-scope mechanics for agent callers (visibility, not policy — the
+  // decisions live in the guard baseline, cli/guard.ts).
   if (ctx.caller === 'agent') {
     const configRow = getContainerConfig(ctx.agentGroupId);
     const cliScope = configRow?.cli_scope ?? 'group';
 
-    if (cliScope === 'disabled') {
-      return err(req.id, 'forbidden', 'CLI access is disabled for this agent group.');
-    }
-
     if (cliScope === 'group') {
-      // Only allow whitelisted resources and general commands (no resource, like help)
-      if (cmd.resource && !GROUP_SCOPED_RESOURCES.has(cmd.resource)) {
-        return err(req.id, 'forbidden', `CLI access is scoped to this agent group. Cannot access "${cmd.resource}".`);
-      }
-
-      // Enforce group scope on all agent-group-related args.
-      // Different resources use different arg names for the agent group ID.
-      // Only check --id for resources where it IS the agent group ID.
-      const groupArgs = ['agent_group_id', 'group'] as const;
-      for (const key of groupArgs) {
-        if (req.args[key] && req.args[key] !== ctx.agentGroupId) {
-          return err(req.id, 'forbidden', 'CLI access is scoped to this agent group.');
-        }
-      }
-      if (
-        (cmd.resource === 'groups' || cmd.resource === 'destinations') &&
-        req.args.id &&
-        req.args.id !== ctx.agentGroupId
-      ) {
-        return err(req.id, 'forbidden', 'CLI access is scoped to this agent group.');
-      }
-
-      // Block cli_scope changes from group-scoped agents (privilege escalation)
-      if (req.args.cli_scope !== undefined || req.args['cli-scope'] !== undefined) {
-        return err(req.id, 'forbidden', 'Cannot change cli_scope from a group-scoped agent.');
-      }
-
       // Auto-fill agent-group-related args so the agent doesn't need
       // to pass its own group ID explicitly.
       const fill: Record<string, unknown> = {
@@ -138,7 +99,23 @@ export async function dispatch(
     }
   }
 
-  if (ctx.caller !== 'host' && cmd.access === 'approval' && !opts.approved) {
+  const decision = guard({
+    action: commandGuardAction(cmd),
+    actor: actorFor(ctx),
+    payload: req.args,
+    grant: opts.grant ?? null,
+  });
+
+  if (decision.effect === 'deny') {
+    return err(req.id, 'forbidden', decision.reason);
+  }
+
+  if (decision.effect === 'hold') {
+    if (ctx.caller !== 'agent') {
+      // Holds only arise for agent callers; anything else is a guard bug —
+      // fail closed rather than card a ghost.
+      return err(req.id, 'forbidden', decision.reason);
+    }
     const session = getSession(ctx.sessionId);
     if (!session) {
       return err(req.id, 'handler-error', 'Session not found.');
@@ -157,7 +134,7 @@ export async function dispatch(
       payload: { frame: { id: req.id, command: req.command, args: req.args }, callerContext: ctx },
       title: `CLI: ${req.command}`,
       question: `Agent "${agentName}" wants to run:\n\`ncl ${req.command}${argSummary ? ' ' + argSummary : ''}\``,
-      approverScope: approverScopeFor(cmd, req.args, ctx.agentGroupId),
+      approverScope: decision.approverScope,
     });
 
     return err(req.id, 'approval-pending', 'Approval request sent to admin. You will be notified of the result.');
@@ -216,10 +193,19 @@ export async function dispatch(
   }
 }
 
-registerApprovalHandler('cli_command', async ({ payload, notify }) => {
+registerApprovalHandler('cli_command', async ({ payload, approval, notify }) => {
   const frame = payload.frame as RequestFrame;
-  const callerContext = parseCallerContext(payload.callerContext) ?? { caller: 'host' };
-  const response = await dispatch(frame, callerContext, { approved: true });
+  const callerContext = parseCallerContext(payload.callerContext);
+  if (!callerContext) {
+    // D2: a malformed caller context must refuse the replay — never fall
+    // back to the most privileged caller.
+    log.warn('cli_command replay refused — malformed caller context', { command: frame?.command });
+    notify(
+      `Your \`ncl ${frame?.command ?? '?'}\` request was approved, but its caller context could not be verified — the replay was refused.`,
+    );
+    return;
+  }
+  const response = await dispatch(frame, callerContext, { grant: approval });
 
   if (response.ok) {
     const data = typeof response.data === 'string' ? response.data : JSON.stringify(response.data, null, 2);

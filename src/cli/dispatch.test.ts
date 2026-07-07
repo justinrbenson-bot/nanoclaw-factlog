@@ -9,6 +9,7 @@ const approvalState = vi.hoisted(() => ({
     | ((args: {
         session: unknown;
         payload: Record<string, unknown>;
+        approval: Record<string, unknown>;
         userId: string;
         notify: (text: string) => void;
       }) => Promise<void>),
@@ -18,6 +19,7 @@ const approvalState = vi.hoisted(() => ({
       handler: (args: {
         session: unknown;
         payload: Record<string, unknown>;
+        approval: Record<string, unknown>;
         userId: string;
         notify: (text: string) => void;
       }) => Promise<void>,
@@ -43,8 +45,10 @@ vi.mock('../db/agent-groups.js', () => ({
 }));
 
 const mockGetSession = vi.fn();
+const mockGetPendingApproval = vi.fn();
 vi.mock('../db/sessions.js', () => ({
   getSession: (...args: unknown[]) => mockGetSession(...args),
+  getPendingApproval: (...args: unknown[]) => mockGetPendingApproval(...args),
 }));
 
 // dispatch's post-handler looks up the resource's `scopeField` via getResource.
@@ -488,16 +492,78 @@ describe('CLI scope enforcement', () => {
       callerContext: ctx,
     });
 
+    // The continuation carries the verified approval row as its grant; the
+    // guard accepts it only while the row is live.
+    const grantRow = {
+      approval_id: 'appr-replay-1',
+      action: 'cli_command',
+      payload: JSON.stringify(approval.payload),
+    };
+    mockGetPendingApproval.mockReturnValue(grantRow);
+
     expect(approvalState.approvalHandler).toBeTypeOf('function');
     await approvalState.approvalHandler!({
       session: { id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' },
       payload: approval.payload,
+      approval: grantRow,
       userId: 'telegram:admin',
       notify: vi.fn(),
     });
 
     expect(approvalState.observedContexts).toEqual([ctx]);
     expect(approvalState.requestApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it('D2: a malformed replay caller context refuses the replay (never falls back to host)', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'Group One' });
+
+    const ctx = agentCtx();
+    await dispatch({ id: '1', command: 'approval-context-command', args: {} }, ctx);
+    const approval = approvalState.requestApproval.mock.calls[0][0] as { payload: Record<string, unknown> };
+
+    const grantRow = { approval_id: 'appr-replay-2', action: 'cli_command', payload: JSON.stringify(approval.payload) };
+    mockGetPendingApproval.mockReturnValue(grantRow);
+
+    const notify = vi.fn();
+    await approvalState.approvalHandler!({
+      session: { id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' },
+      payload: { ...approval.payload, callerContext: { caller: 'agent', sessionId: 42 } }, // malformed
+      approval: grantRow,
+      userId: 'telegram:admin',
+      notify,
+    });
+
+    // The command never executed — as host or anyone else — and the agent was told.
+    expect(approvalState.observedContexts).toEqual([]);
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('refused'));
+  });
+
+  it('a dead grant refuses the replay instead of re-executing or re-holding', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'Group One' });
+
+    const ctx = agentCtx();
+    await dispatch({ id: '1', command: 'approval-context-command', args: {} }, ctx);
+    const approval = approvalState.requestApproval.mock.calls[0][0] as { payload: Record<string, unknown> };
+
+    const grantRow = { approval_id: 'appr-replay-3', action: 'cli_command', payload: JSON.stringify(approval.payload) };
+    mockGetPendingApproval.mockReturnValue(undefined); // row already resolved/deleted
+
+    const notify = vi.fn();
+    await approvalState.approvalHandler!({
+      session: { id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' },
+      payload: approval.payload,
+      approval: grantRow,
+      userId: 'telegram:admin',
+      notify,
+    });
+
+    expect(approvalState.observedContexts).toEqual([]);
+    expect(approvalState.requestApproval).toHaveBeenCalledTimes(1); // no second card
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('failed'));
   });
 
   // --- Approver blast radius (D1) ---

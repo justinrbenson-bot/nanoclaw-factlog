@@ -66,8 +66,10 @@ For ad-hoc queries from skills or scripts, use the in-tree wrapper rather than t
 | `src/session-manager.ts` | Resolves sessions; opens `inbound.db` / `outbound.db`; manages heartbeat path |
 | `src/container-runner.ts` | Spawns per-agent-group Docker containers with session DB + outbox mounts, OneCLI `ensureAgent` |
 | `src/container-runtime.ts` | Runtime selection (Docker vs Apple containers), orphan cleanup |
+| `src/guard/` | Privileged-action decision seam: `guard()` → allow \| hold \| deny. Domain-free leaf (decision function, registration-derived action catalog, tighten-only rule sources — `agent_message_policies` is the first); domain baselines register from module-edge `guard.ts` adapters (cli, agent-to-agent, self-mod, permissions). All four handler registries wrap at registration; approved replays carry the approval row as a grant and re-check the structural baseline. Conformance test: `src/guard/conformance.test.ts` |
 | `src/modules/permissions/access.ts` | `canAccessAgentGroup` — owner / global admin / scoped admin / member resolution against `user_roles` + `agent_group_members` |
 | `src/modules/approvals/primitive.ts` | `pickApprover`, `pickApprovalDelivery`, `requestApproval`, approval-handler registry |
+| `src/modules/approvals/eligibility.ts` | `mayResolve` — the one click-authorization rule (eligibility `exclusive` \| `admins-of-scope` + blast-radius scope) for every hold |
 | `src/command-gate.ts` | Router-side admin command gate — queries `user_roles` directly (no env var, no container-side check) |
 | `src/modules/approvals/onecli-approvals.ts` | OneCLI credentialed-action approval bridge |
 | `src/modules/permissions/user-dm.ts` | Cold-DM resolution + `user_dms` cache |

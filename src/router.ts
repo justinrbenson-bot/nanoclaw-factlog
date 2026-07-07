@@ -19,6 +19,7 @@
  */
 import { getChannelAdapter } from './channels/channel-registry.js';
 import { gateCommand } from './command-gate.js';
+import { guard, type GuardActor } from './guard/index.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import {
@@ -117,13 +118,47 @@ export function setSenderScopeGate(fn: SenderScopeGateFn): void {
  * Used by modules to capture free-text DM replies during multi-step approval
  * flows — the permissions module (agent naming during channel registration)
  * and the approvals module (reject-with-reason capture).
+ *
+ * An interceptor whose capture performs a privileged operation (the
+ * channel-registration name capture creates an agent group + wiring)
+ * registers with a guard spec: the registry wraps it so the guard's decision
+ * stands between the free-text reply and the handler — the D4 fix's
+ * interceptor half. `claims` returns the guard consult for events the
+ * interceptor would act on (null = not mine, pass through); a deny consumes
+ * the message without acting.
  */
 export type MessageInterceptorFn = (event: InboundEvent) => Promise<boolean>;
 
+export interface InterceptorGuardSpec {
+  /** Dotted guard-catalog action consulted before the interceptor acts. */
+  action: string;
+  /** The guard consult for events this interceptor would act on; null = not mine. */
+  claims: (event: InboundEvent) => { actor: GuardActor; payload: Record<string, unknown> } | null;
+  /** Domain cleanup when the guard denies (e.g. disarm the capture). */
+  onDeny?: (event: InboundEvent) => void;
+}
+
 const messageInterceptors: MessageInterceptorFn[] = [];
 
-export function registerMessageInterceptor(fn: MessageInterceptorFn): void {
-  messageInterceptors.push(fn);
+export function registerMessageInterceptor(fn: MessageInterceptorFn, guardSpec?: InterceptorGuardSpec): void {
+  if (!guardSpec) {
+    messageInterceptors.push(fn);
+    return;
+  }
+  messageInterceptors.push(async (event) => {
+    const consult = guardSpec.claims(event);
+    if (!consult) return fn(event);
+    const decision = guard({ action: guardSpec.action, actor: consult.actor, payload: consult.payload });
+    if (decision.effect !== 'allow') {
+      log.warn('Interceptor capture rejected by guard — consuming without acting', {
+        action: guardSpec.action,
+        reason: decision.reason,
+      });
+      guardSpec.onDeny?.(event);
+      return true;
+    }
+    return fn(event);
+  });
 }
 
 /**
