@@ -132,11 +132,16 @@ async function spawnContainer(session: Session): Promise<void> {
   const containerConfig = materializeContainerJson(agentGroup.id);
 
   // Per-group filesystem state lives forever after first creation. Init is
-  // idempotent: it only writes paths that don't already exist, so this call
-  // is a no-op for groups that have spawned before. Runs before the provider
-  // contribution so a surfaces-providing provider finds the group dir ready.
+  // idempotent: it only writes paths that don't already exist (plus the
+  // harness-capability reconcile, which converges settings.json to the
+  // resolved state), so this call is safe for groups that have spawned
+  // before. Runs before the provider contribution so a surfaces-providing
+  // provider finds the group dir ready.
   const providerName = resolveProviderName(session.agent_provider, containerConfig.provider);
-  initGroupFilesystem(agentGroup, { provider: providerName });
+  initGroupFilesystem(agentGroup, {
+    provider: providerName,
+    harnessCapabilities: containerConfig.harnessCapabilities,
+  });
 
   // Resolve the effective provider + any host-side contribution it declares
   // (extra mounts, env passthrough). Computed once and threaded through both

@@ -5,13 +5,16 @@ import { DATA_DIR, GROUPS_DIR } from './config.js';
 import { ensureContainerConfig } from './db/container-configs.js';
 import { log } from './log.js';
 import { providerProvidesAgentSurfaces } from './providers/provider-container-registry.js';
+import type { HarnessCapabilityState } from './harness-capabilities.js';
 import type { AgentGroup } from './types.js';
 
+// Managed harness keys (the teams env key, disableWorkflows) are deliberately
+// NOT in the static default — they enter settings.json exclusively through
+// reconcileHarnessSettings() from the group's resolved capability state.
 const DEFAULT_SETTINGS_JSON =
   JSON.stringify(
     {
       env: {
-        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
         CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
         CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
       },
@@ -49,7 +52,12 @@ const DEFAULT_SETTINGS_JSON =
  */
 export function initGroupFilesystem(
   group: AgentGroup,
-  opts?: { instructions?: string; provider?: string | null },
+  opts?: {
+    instructions?: string;
+    provider?: string | null;
+    /** RESOLVED harness-capability map — when provided (the spawn path), settings.json is reconciled to it. */
+    harnessCapabilities?: Record<string, HarnessCapabilityState>;
+  },
 ): void {
   const initialized: string[] = [];
 
@@ -126,6 +134,13 @@ export function initGroupFilesystem(
       ensurePreCompactHook(settingsFile, initialized);
     }
 
+    // Runs in BOTH branches: a freshly written default must be reconciled in
+    // the same call, or the group's first container lifetime ships without
+    // its capability state (the default file deliberately omits managed keys).
+    if (opts?.harnessCapabilities) {
+      reconcileHarnessSettings(settingsFile, opts.harnessCapabilities, initialized);
+    }
+
     // Skills directory — created empty here; symlinks are synced at spawn
     // time by container-runner.ts based on container.json skills selection.
     const skillsDst = path.join(claudeDir, 'skills');
@@ -171,5 +186,61 @@ function ensurePreCompactHook(settingsFile: string, initialized: string[]): void
     initialized.push('settings.json (added PreCompact hook)');
   } catch {
     // Don't break init if settings.json is malformed — it'll use whatever's there.
+  }
+}
+
+const TEAMS_ENV_KEY = 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS';
+
+/**
+ * Reconcile the managed harness-capability keys in settings.json to the
+ * group's resolved capability state. Manages exactly two keys — the
+ * agent-teams env key and `disableWorkflows` — adding AND removing them;
+ * everything else in the file (operator hand-edits, the PreCompact hook,
+ * unmanaged env keys) is preserved verbatim. Runs on every spawn, so
+ * pre-existing groups converge to the configured state, including removal
+ * of the legacy always-on teams key. See docs/harness-capabilities.md.
+ */
+function reconcileHarnessSettings(
+  settingsFile: string,
+  caps: Record<string, HarnessCapabilityState>,
+  initialized: string[],
+): void {
+  try {
+    const raw = fs.readFileSync(settingsFile, 'utf-8');
+    const settings = JSON.parse(raw) as Record<string, unknown> & { env?: Record<string, unknown> };
+
+    // agent-teams: the settings env key is the ONLY working switch on the
+    // pinned CLI — settings env strictly beats SDK options env, so presence
+    // in this file IS the state.
+    if (caps['agent-teams'] === 'on') {
+      if (!settings.env) settings.env = {};
+      settings.env[TEAMS_ENV_KEY] = '1';
+    } else if (settings.env && TEAMS_ENV_KEY in settings.env) {
+      delete settings.env[TEAMS_ENV_KEY];
+    }
+
+    // workflow: disableWorkflows removes the Workflow tool AND its agent-types
+    // catalog block from every request. The runner's disallowedTools backstop
+    // covers a malformed or hand-reverted file — that backstop is what makes
+    // the warn-and-continue below acceptable.
+    if (caps.workflow === 'off') {
+      settings.disableWorkflows = true;
+    } else if ('disableWorkflows' in settings) {
+      delete settings.disableWorkflows;
+    }
+
+    const next = JSON.stringify(settings, null, 2) + '\n';
+    if (next === raw) return; // no churn on the every-spawn path
+
+    // tmp+rename: two sessions of one group can spawn concurrently; both
+    // compute identical output from the same DB row, so last-rename-wins is
+    // harmless — but a torn write mid-read by the CLI would not be.
+    const tmp = `${settingsFile}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, next);
+    fs.renameSync(tmp, settingsFile);
+    initialized.push('settings.json (reconciled harness capabilities)');
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+    log.warn('settings.json is malformed — skipping harness-capability reconcile', { settingsFile });
   }
 }

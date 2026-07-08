@@ -25,6 +25,7 @@ export interface ContainerConfigRow {
   packages_npm: string; // JSON: string[]
   additional_mounts: string; // JSON: AdditionalMountConfig[]
   cli_scope: string; // 'disabled' | 'group' | 'global'
+  harness_capabilities: string; // JSON: sparse Record<key, 'on'|'off'> overrides — see src/harness-capabilities.ts
   updated_at: string;
 }
 
