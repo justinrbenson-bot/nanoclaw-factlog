@@ -136,6 +136,33 @@ register({
   },
 });
 
+register({
+  name: 'roles-grant',
+  description: 'approval command on a non-scoped resource (global blast radius)',
+  resource: 'roles',
+  access: 'approval',
+  parseArgs: (raw) => raw,
+  handler: async () => ({}),
+});
+
+register({
+  name: 'members-add-gated',
+  description: 'approval command on a scoped resource',
+  resource: 'members',
+  access: 'approval',
+  parseArgs: (raw) => raw,
+  handler: async () => ({}),
+});
+
+register({
+  name: 'groups-update',
+  description: 'approval command on the groups resource (id = agent group)',
+  resource: 'groups',
+  access: 'approval',
+  parseArgs: (raw) => raw,
+  handler: async () => ({}),
+});
+
 // Commands that return data shaped like real resources (for post-handler filtering tests)
 register({
   name: 'groups-list-data',
@@ -482,6 +509,47 @@ describe('CLI scope enforcement', () => {
 
     expect(approvalState.observedContexts).toEqual([ctx]);
     expect(approvalState.requestApproval).toHaveBeenCalledTimes(1);
+  });
+
+  // --- Approver blast radius (D1) ---
+
+  it('holds on non-scoped resources carry approverScope global (roles grant)', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'Group One' });
+
+    const resp = await dispatch(
+      { id: '1', command: 'roles-grant', args: { user: 'telegram:mallory', role: 'owner' } },
+      agentCtx(),
+    );
+
+    expect(resp.ok).toBe(false);
+    expect(approvalState.requestApproval).toHaveBeenCalledTimes(1);
+    expect(approvalState.requestApproval.mock.calls[0][0]).toMatchObject({ approverScope: 'global' });
+  });
+
+  it('holds on scoped resources pinned to the caller stay approverScope group', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'Group One' });
+
+    const resp = await dispatch({ id: '1', command: 'members-add-gated', args: { user: 'telegram:new' } }, agentCtx());
+
+    expect(resp.ok).toBe(false);
+    expect(approvalState.requestApproval).toHaveBeenCalledTimes(1);
+    expect(approvalState.requestApproval.mock.calls[0][0]).toMatchObject({ approverScope: 'group' });
+  });
+
+  it('holds on scoped resources targeting another group escalate to approverScope global', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'Group One' });
+
+    const resp = await dispatch({ id: '1', command: 'groups-update', args: { id: 'g2' } }, agentCtx());
+
+    expect(resp.ok).toBe(false);
+    expect(approvalState.requestApproval).toHaveBeenCalledTimes(1);
+    expect(approvalState.requestApproval.mock.calls[0][0]).toMatchObject({ approverScope: 'global' });
   });
 
   // --- Post-handler filtering ---

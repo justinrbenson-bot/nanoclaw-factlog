@@ -4,6 +4,10 @@ import type { ApprovalHandler } from '../approvals/index.js';
 import { performAgentRoute, type RoutableAgentMessage } from './agent-route.js';
 
 export const applyA2aMessageGate: ApprovalHandler = async ({ session, payload, notify }) => {
+  if (!session) {
+    log.warn('a2a_message_gate approval resolved without a session — dropping');
+    return;
+  }
   const { id, platform_id, content, in_reply_to } = payload;
   if (typeof platform_id !== 'string' || !platform_id) {
     notify('Message approved but the target agent group was missing from the request.');

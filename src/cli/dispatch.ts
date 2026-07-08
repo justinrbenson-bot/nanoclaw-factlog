@@ -13,12 +13,31 @@ import { registerApprovalHandler, requestApproval } from '../modules/approvals/i
 import type { CallerContext, ErrorCode, RequestFrame, ResponseFrame } from './frame.js';
 import { getResource } from './crud.js';
 import { listVerbs, renderVerbHelp } from './help-render.js';
-import { GROUP_SCOPE_RESOURCES, listCommands, lookup } from './registry.js';
+import { GROUP_SCOPE_RESOURCES, listCommands, lookup, type CommandDef } from './registry.js';
 
 type DispatchOptions = {
   /** True when a command is being replayed after approval. */
   approved?: boolean;
 };
+
+/**
+ * Blast radius of a held command, for the hold's approver rule (D1): a
+ * mutation of a non-group-scoped resource (roles, users, wirings,
+ * messaging-groups, policies) — or one explicitly targeting another agent
+ * group — needs an owner or global admin to approve; a scoped admin's click
+ * is rejected. GROUP_SCOPE_RESOURCES anchors rows to one agent group, so its
+ * held mutations default to group-local blast radius.
+ */
+function approverScopeFor(
+  cmd: CommandDef,
+  args: Record<string, unknown>,
+  callerAgentGroupId: string,
+): 'group' | 'global' {
+  if (!cmd.resource || !GROUP_SCOPE_RESOURCES.has(cmd.resource)) return 'global';
+  const groupRefs = [args.agent_group_id, args.group];
+  if (cmd.resource === 'groups' || cmd.resource === 'destinations') groupRefs.push(args.id);
+  return groupRefs.some((v) => v !== undefined && v !== callerAgentGroupId) ? 'global' : 'group';
+}
 
 export async function dispatch(
   req: RequestFrame,
@@ -146,6 +165,7 @@ export async function dispatch(
       payload: { frame: { id: req.id, command: req.command, args: req.args }, callerContext: ctx },
       title: `CLI: ${req.command}`,
       question: `Agent "${agentName}" wants to run:\n\`ncl ${req.command}${argSummary ? ' ' + argSummary : ''}\``,
+      approverScope: approverScopeFor(cmd, req.args, ctx.agentGroupId),
     });
 
     return err(req.id, 'approval-pending', 'Approval request sent to admin. You will be notified of the result.');

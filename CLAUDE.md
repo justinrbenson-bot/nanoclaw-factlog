@@ -67,7 +67,8 @@ For ad-hoc queries from skills or scripts, use the in-tree wrapper rather than t
 | `src/container-runner.ts` | Spawns per-agent-group Docker containers with session DB + outbox mounts, OneCLI `ensureAgent` |
 | `src/container-runtime.ts` | Docker CLI wrapper (runtime binary, host-gateway args, mount args), orphan cleanup |
 | `src/modules/permissions/access.ts` | `canAccessAgentGroup` — owner / global admin / scoped admin / member resolution against `user_roles` + `agent_group_members` |
-| `src/modules/approvals/primitive.ts` | `pickApprover`, `pickApprovalDelivery`, `requestApproval`, approval-handler registry |
+| `src/modules/approvals/primitive.ts` | `pickApprover`, `pickApprovalDelivery`, `requestApproval`, approval-handler registry, hold-lifecycle observers (`registerApprovalRequestedHandler` / `registerApprovalResolvedHandler` — every stack announces creation + resolution through these) |
+| `src/modules/approvals/approver-rule.ts` | `mayResolve` — the one click-authorization rule (approver rule `exclusive` \| `admins-of-scope` + blast-radius scope) for every hold |
 | `src/command-gate.ts` | Router-side admin command gate — queries `user_roles` directly (no env var, no container-side check) |
 | `src/modules/approvals/onecli-approvals.ts` | OneCLI credentialed-action approval bridge |
 | `src/modules/permissions/user-dm.ts` | Cold-DM resolution + `user_dms` cache |
