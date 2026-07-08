@@ -441,6 +441,16 @@ export function registerDeliveryAction(
   spec?: DeliveryGuardSpec,
 ): void {
   if (actionHandlers.has(action)) {
+    // Replacing a guard-wrapped action with an unguarded handler would
+    // disarm the guard while the catalog (and the conformance walk) still
+    // report it guarded — refuse. A skill that wants to extend a guarded
+    // action must compose at the module's exported functions instead, or
+    // re-register with a guard spec of its own.
+    if (!spec && guardedActions.has(action)) {
+      throw new Error(
+        `delivery action "${action}" is guard-wrapped; re-registering it without a guard spec would disarm the guard`,
+      );
+    }
     log.warn('Delivery action handler overwritten', { action });
   }
   if (!spec) {

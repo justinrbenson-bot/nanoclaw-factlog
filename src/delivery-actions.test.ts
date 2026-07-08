@@ -35,4 +35,24 @@ describe('delivery action registry', () => {
     registerDeliveryAction('test_overwrite_action', second);
     expect(getDeliveryAction('test_overwrite_action')).toBe(second);
   });
+
+  it('refuses to replace a guard-wrapped action with an unguarded handler', () => {
+    registerDeliveryAction('test_guarded_overwrite', async () => {}, {
+      guardAction: 'test.guarded-overwrite',
+      requestHold: async () => {},
+    });
+
+    // Disarming the guard by re-registering without a spec must throw —
+    // otherwise the catalog (and the conformance walk) would still report
+    // the action guarded while the live path runs unguarded.
+    expect(() => registerDeliveryAction('test_guarded_overwrite', async () => {})).toThrow(/disarm the guard/);
+
+    // Re-registering WITH a spec stays allowed (a legitimate replacement
+    // keeps the action guarded).
+    registerDeliveryAction('test_guarded_overwrite', async () => {}, {
+      guardAction: 'test.guarded-overwrite',
+      requestHold: async () => {},
+    });
+    expect(getDeliveryAction('test_guarded_overwrite')).toBeDefined();
+  });
 });

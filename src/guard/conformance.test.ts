@@ -2,20 +2,19 @@
  * Guard conformance — the non-bypass invariant, checked structurally.
  *
  * Walks the real command registry and the real delivery-action registry
- * (loaded via their production barrels) and fails if any mutating entry
- * lacks a guard-catalog mapping. A new privileged command or delivery
- * action cannot quietly ship ungated: registration derives the catalog
- * entry, and this test makes drift loud.
+ * (loaded via their production barrels) against the guard catalog. The walk
+ * itself lives in src/guard-conformance.ts and runs twice: here in CI, and
+ * at every boot (enforceGuardConformance in index.ts refuses to start on a
+ * violation) — CI can't see skill-installed registrations, the boot check
+ * can. A new privileged command or delivery action cannot quietly ship
+ * ungated: registration derives the catalog entry, and this walk makes
+ * drift loud.
  *
- * Declared exemption classes (the enforcement boundary, per the
- * guarded-actions design decision 1):
- *   - scheduling self-actions — an agent scheduling its own wake-ups mutates
- *     only its own task rows; not a privileged action class (yet).
- *   - cli_request — the transport bridge into dispatch(); every inner
- *     command is guarded at dispatch, so the envelope itself carries no
- *     privilege.
- *   - reads (list/get/help) are catalog-mapped via registration too, but
- *     their baselines allow; the mutating set is what MUST be mapped.
+ * The declared exemption classes live with the walk
+ * (EXEMPT_DELIVERY_ACTIONS): scheduling self-actions and the cli_request
+ * transport bridge (its inner commands are guarded at dispatch). Reads
+ * (list/get/help) are catalog-mapped via registration too, but their
+ * baselines allow; the mutating set is what MUST be mapped.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -26,21 +25,15 @@ import '../cli/delivery-action.js';
 
 import { listCommands } from '../cli/registry.js';
 import { commandGuardAction } from '../cli/guard.js';
-import { listDeliveryActions } from '../delivery.js';
+import { listDeliveryActions, registerDeliveryAction } from '../delivery.js';
+import { EXEMPT_DELIVERY_ACTIONS, guardConformanceViolations } from '../guard-conformance.js';
 import { getGuardedAction } from './catalog.js';
 
-const EXEMPT_DELIVERY_ACTIONS = new Set([
-  // Scheduling self-actions: the agent mutating its own schedule.
-  'schedule_task',
-  'cancel_task',
-  'pause_task',
-  'resume_task',
-  'update_task',
-  // Transport bridge: inner commands are guarded at dispatch.
-  'cli_request',
-]);
-
 describe('guard conformance', () => {
+  it('the full walk (shared with the boot check) reports zero violations', () => {
+    expect(guardConformanceViolations()).toEqual([]);
+  });
+
   it('every mutating ncl command maps to a guard catalog entry that can hold', () => {
     const mutating = listCommands().filter((cmd) => cmd.access === 'approval');
     expect(mutating.length).toBeGreaterThan(0);
@@ -81,5 +74,16 @@ describe('guard conformance', () => {
       install_packages: 'self_mod.install_packages',
       add_mcp_server: 'self_mod.add_mcp_server',
     });
+  });
+
+  // KEEP LAST: registers a rogue action into the shared per-worker registry,
+  // so every walk after this point sees the violation.
+  it('the walk names an unguarded, non-exempt delivery action (what the boot check refuses on)', () => {
+    registerDeliveryAction('test_rogue_privileged_action', async () => {});
+
+    const violations = guardConformanceViolations();
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain('test_rogue_privileged_action');
+    expect(violations[0]).toContain('neither guard-mapped nor on the declared exemption list');
   });
 });

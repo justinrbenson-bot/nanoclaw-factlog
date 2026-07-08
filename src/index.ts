@@ -14,6 +14,7 @@ import { initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
+import { enforceGuardConformance } from './guard-conformance.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
 import { log } from './log.js';
@@ -68,6 +69,12 @@ async function main(): Promise<void> {
   // 0.5 Upgrade tripwire — refuse to start if this install was updated
   // outside the sanctioned path (raw `git pull` instead of /update-nanoclaw).
   enforceUpgradeTripwire();
+
+  // 0.6 Guard conformance — every import-time registration has already run;
+  // refuse to start if any privileged command / delivery action is unmapped
+  // (CI can't see skill-installed code — this makes the invariant hold at
+  // the boundary where third-party registrations enter).
+  enforceGuardConformance();
 
   // 1. Init central DB
   const dbPath = path.join(DATA_DIR, 'v2.db');
