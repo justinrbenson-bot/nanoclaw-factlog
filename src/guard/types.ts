@@ -3,9 +3,9 @@
  *
  * The guard is a domain-free leaf: this module may import the DB read layer,
  * config, log, and shared types — never src/cli/* or src/modules/*. Domain
- * knowledge (what an action's structural baseline checks, which rules bite)
- * arrives via registration: catalog entries (catalog.ts) and rule sources
- * (rules.ts) are registered by the domain modules at their module edges.
+ * knowledge (what an action's structural baseline checks) arrives via
+ * registration: catalog entries (catalog.ts) are registered by the domain
+ * modules at their module edges.
  */
 import type { ApproverRule, ApproverScope, PendingApproval } from '../types.js';
 
@@ -35,11 +35,6 @@ export interface GuardInput {
 export type GuardDecision =
   | { effect: 'allow'; reason: string }
   | { effect: 'hold'; approverRule: ApproverRule; approverScope: ApproverScope; reason: string }
-  | { effect: 'deny'; reason: string };
-
-/** Tighten-only decision a rule source may produce — rules can never allow. */
-export type RuleDecision =
-  | { effect: 'hold'; approverRule: ApproverRule; approverScope?: ApproverScope; reason: string }
   | { effect: 'deny'; reason: string };
 
 export const ALLOW = (reason: string): GuardDecision => ({ effect: 'allow', reason });

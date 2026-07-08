@@ -1,7 +1,6 @@
 /**
- * Agent-to-agent guard adapter — the module's catalog entries and the
- * guard's first rule source, composed at the module edge (imported by
- * ./index.ts).
+ * Agent-to-agent guard adapter — the module's catalog entries, composed at
+ * the module edge (imported by ./index.ts).
  *
  * agents.create — the cli_scope branch moved verbatim out of
  * create-agent.ts: `global` scope creates directly (create_agent is the
@@ -9,18 +8,18 @@
  * default `group` scope, and unknown/missing config, fail-closed — holds for
  * the requesting group's admin chain.
  *
- * a2a.send — the structural baseline moved verbatim out of
- * routeAgentMessage: self-sends allow without a destination row; a missing
- * destination row denies; a missing target group denies. The
- * agent_message_policies table becomes a RULE SOURCE: a row for the
- * (from, to) pair holds exclusively for the row's named approver. The
- * ghost-policy edge (policy row with no destination row) composes to DENY —
- * deny > hold in the lattice, exactly today's outcome (the destination
- * throw preceded the policy check).
+ * a2a.send — the decision moved verbatim out of routeAgentMessage, in its
+ * original check order: self-sends allow without a destination row; a
+ * missing destination row denies; a missing target group denies; an
+ * agent_message_policies row for the (from, to) pair holds exclusively for
+ * the row's named approver. The ghost-policy edge (policy row with no
+ * destination row) denies — the destination check precedes the policy check,
+ * exactly today's outcome. Policy rows can only tighten (hold), never allow:
+ * absence of a row falls through to the structural checks.
  */
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getContainerConfig } from '../../db/container-configs.js';
-import { ALLOW, DENY, HOLD, registerGuardedAction, registerRuleSource } from '../../guard/index.js';
+import { ALLOW, DENY, HOLD, registerGuardedAction } from '../../guard/index.js';
 import { hasDestination } from './db/agent-destinations.js';
 import { getMessagePolicy } from './db/agent-message-policies.js';
 
@@ -83,23 +82,15 @@ registerGuardedAction({
     if (!getAgentGroup(to)) {
       return DENY(`target agent group ${to} not found for message ${String(input.payload.id)}`);
     }
-    return ALLOW(isSelf ? 'self-send' : 'destination grant exists');
+    if (isSelf) return ALLOW('self-send');
+    const policy = getMessagePolicy(from, to);
+    if (policy) {
+      return HOLD(
+        { kind: 'exclusive', approverUserId: policy.approver },
+        'group',
+        `a2a message policy ${from}→${to} holds for ${policy.approver}`,
+      );
+    }
+    return ALLOW('destination grant exists');
   },
-});
-
-// The guard's first rule source: agent_message_policies rows are tighten-only
-// holds with a named (exclusive) approver. Self-sends are never gated.
-registerRuleSource((input) => {
-  if (input.action !== 'a2a.send' || input.actor.kind !== 'agent') return [];
-  const to = input.resource?.to;
-  if (!to || to === input.actor.agentGroupId) return [];
-  const policy = getMessagePolicy(input.actor.agentGroupId, to);
-  if (!policy) return [];
-  return [
-    {
-      effect: 'hold',
-      approverRule: { kind: 'exclusive', approverUserId: policy.approver },
-      reason: `a2a message policy ${input.actor.agentGroupId}→${to} holds for ${policy.approver}`,
-    },
-  ];
 });

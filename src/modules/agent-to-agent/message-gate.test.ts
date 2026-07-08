@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
-import './guard.js'; // register the a2a.send catalog entry + policy rule source
+import './guard.js'; // register the a2a.send catalog entry (incl. the policy hold)
 import { routeAgentMessage } from './agent-route.js';
 import { createDestination, deleteDestination, deleteAllDestinationsTouching } from './db/agent-destinations.js';
 import { getMessagePolicy, removeMessagePolicy, setMessagePolicy } from './db/agent-message-policies.js';

@@ -1,19 +1,17 @@
 /**
- * Guard decision-function unit tests: the strictest-wins lattice
- * (deny > hold > allow), per-cell rule×baseline composition, hold∧hold
- * approver-rule intersection (incl. the empty-intersection owner escalation),
- * grant semantics (satisfies holds, never denies; invalid → refuse), the
- * non-catalog allow, and the fail-closed posture on throwing sources.
+ * Guard decision-function unit tests: the baseline is the decision (allow /
+ * hold / deny returned as-is, non-catalog actions allow), grant semantics
+ * (satisfies holds, never denies; invalid → refuse), and the fail-closed
+ * posture on a throwing baseline.
  *
- * Uses synthetic catalog actions/rules registered per test — the registries
- * are per-worker module state with no reset, so action names are unique.
+ * Uses synthetic catalog actions registered per test — the registry is
+ * per-worker module state with no reset, so action names are unique.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ApproverRule } from '../types.js';
 import { guard } from './guard.js';
 import { registerGuardedAction } from './catalog.js';
-import { registerRuleSource } from './rules.js';
 import { ALLOW, DENY, HOLD, type GuardInput } from './types.js';
 
 const mockGetPendingApproval = vi.fn();
@@ -31,9 +29,6 @@ function input(action: string, extra: Partial<GuardInput> = {}): GuardInput {
 }
 
 const AOS_G1: ApproverRule = { kind: 'admins-of-scope', agentGroupId: 'ag-1', deliveredTo: null };
-const AOS_G2: ApproverRule = { kind: 'admins-of-scope', agentGroupId: 'ag-2', deliveredTo: null };
-const EX_DANA: ApproverRule = { kind: 'exclusive', approverUserId: 'tg:dana' };
-const EX_SAM: ApproverRule = { kind: 'exclusive', approverUserId: 'tg:sam' };
 
 beforeEach(() => {
   mockGetPendingApproval.mockReset();
@@ -43,95 +38,31 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('lattice — strictest wins', () => {
+describe('the baseline is the decision', () => {
   it('non-catalog action → allow', () => {
     expect(guard(input('test.unregistered-read')).effect).toBe('allow');
   });
 
-  it('baseline allow + no rules → allow', () => {
+  it('baseline allow → allow', () => {
     registerGuardedAction({ action: 't.allow1', baseline: () => ALLOW('ok') });
     expect(guard(input('t.allow1')).effect).toBe('allow');
   });
 
-  it('baseline allow + rule hold → hold (a rule tightens a structural allow)', () => {
-    registerGuardedAction({ action: 't.allow2', baseline: () => ALLOW('ok') });
-    registerRuleSource((i) =>
-      i.action === 't.allow2' ? [{ effect: 'hold', approverRule: EX_DANA, reason: 'r' }] : [],
-    );
-    const d = guard(input('t.allow2'));
+  it('baseline hold → hold, carrying the approver rule and scope', () => {
+    registerGuardedAction({ action: 't.hold1', baseline: () => HOLD(AOS_G1, 'global', 'needs approval') });
+    const d = guard(input('t.hold1'));
     expect(d.effect).toBe('hold');
-    if (d.effect === 'hold') expect(d.approverRule).toEqual(EX_DANA);
+    if (d.effect === 'hold') {
+      expect(d.approverRule).toEqual(AOS_G1);
+      expect(d.approverScope).toBe('global');
+    }
   });
 
-  it('baseline deny + rule hold → deny (the ghost-policy cell: deny beats hold)', () => {
+  it('baseline deny → deny, carrying the reason', () => {
     registerGuardedAction({ action: 't.deny1', baseline: () => DENY('structurally unauthorized') });
-    registerRuleSource((i) => (i.action === 't.deny1' ? [{ effect: 'hold', approverRule: EX_DANA, reason: 'r' }] : []));
     const d = guard(input('t.deny1'));
     expect(d.effect).toBe('deny');
     if (d.effect === 'deny') expect(d.reason).toBe('structurally unauthorized');
-  });
-
-  it('baseline hold + rule deny → deny', () => {
-    registerGuardedAction({ action: 't.deny2', baseline: () => HOLD(AOS_G1, 'group', 'needs approval') });
-    registerRuleSource((i) => (i.action === 't.deny2' ? [{ effect: 'deny', reason: 'rule says no' }] : []));
-    expect(guard(input('t.deny2')).effect).toBe('deny');
-  });
-
-  it('baseline allow + rule deny → deny (nothing loosens a rule)', () => {
-    registerGuardedAction({ action: 't.deny3', baseline: () => ALLOW('ok') });
-    registerRuleSource((i) => (i.action === 't.deny3' ? [{ effect: 'deny', reason: 'no' }] : []));
-    expect(guard(input('t.deny3')).effect).toBe('deny');
-  });
-
-  it('rules can never allow: an empty rule set leaves the baseline decision intact', () => {
-    registerGuardedAction({ action: 't.hold1', baseline: () => HOLD(AOS_G1, 'group', 'needs approval') });
-    expect(guard(input('t.hold1')).effect).toBe('hold');
-  });
-});
-
-describe('hold ∧ hold — approver-rule intersection', () => {
-  it('identical admin scopes stay that scope', () => {
-    registerGuardedAction({ action: 't.ii1', baseline: () => HOLD(AOS_G1, 'group', 'b') });
-    registerRuleSource((i) => (i.action === 't.ii1' ? [{ effect: 'hold', approverRule: AOS_G1, reason: 'r' }] : []));
-    const d = guard(input('t.ii1'));
-    expect(d.effect).toBe('hold');
-    if (d.effect === 'hold') expect(d.approverRule).toEqual(AOS_G1);
-  });
-
-  it('different admin scopes intersect to the global chain (owners/global admins are in every scope)', () => {
-    registerGuardedAction({ action: 't.ii2', baseline: () => HOLD(AOS_G1, 'group', 'b') });
-    registerRuleSource((i) => (i.action === 't.ii2' ? [{ effect: 'hold', approverRule: AOS_G2, reason: 'r' }] : []));
-    const d = guard(input('t.ii2'));
-    expect(d.effect).toBe('hold');
-    if (d.effect === 'hold') {
-      expect(d.approverRule).toEqual({ kind: 'admins-of-scope', agentGroupId: null, deliveredTo: null });
-    }
-  });
-
-  it('exclusive ∩ admin scope keeps the named approver (the more specific tightening)', () => {
-    registerGuardedAction({ action: 't.ii3', baseline: () => HOLD(AOS_G1, 'group', 'b') });
-    registerRuleSource((i) => (i.action === 't.ii3' ? [{ effect: 'hold', approverRule: EX_DANA, reason: 'r' }] : []));
-    const d = guard(input('t.ii3'));
-    expect(d.effect).toBe('hold');
-    if (d.effect === 'hold') expect(d.approverRule).toEqual(EX_DANA);
-  });
-
-  it('two different exclusive approvers = empty intersection → escalates to the global chain', () => {
-    registerGuardedAction({ action: 't.ii4', baseline: () => HOLD(EX_SAM, 'group', 'b') });
-    registerRuleSource((i) => (i.action === 't.ii4' ? [{ effect: 'hold', approverRule: EX_DANA, reason: 'r' }] : []));
-    const d = guard(input('t.ii4'));
-    expect(d.effect).toBe('hold');
-    if (d.effect === 'hold') {
-      expect(d.approverRule).toEqual({ kind: 'admins-of-scope', agentGroupId: null, deliveredTo: null });
-    }
-  });
-
-  it('approver scope composes as max: any global leg makes the hold global', () => {
-    registerGuardedAction({ action: 't.ii5', baseline: () => HOLD(AOS_G1, 'global', 'b') });
-    registerRuleSource((i) => (i.action === 't.ii5' ? [{ effect: 'hold', approverRule: AOS_G1, reason: 'r' }] : []));
-    const d = guard(input('t.ii5'));
-    expect(d.effect).toBe('hold');
-    if (d.effect === 'hold') expect(d.approverScope).toBe('global');
   });
 });
 
@@ -210,14 +141,5 @@ describe('fail-closed posture', () => {
       },
     });
     expect(guard(input('t.f1')).effect).toBe('deny');
-  });
-
-  it('a throwing rule source denies the whole decision', () => {
-    registerGuardedAction({ action: 't.f2', baseline: () => ALLOW('ok') });
-    registerRuleSource((i) => {
-      if (i.action === 't.f2') throw new Error('rule source down');
-      return [];
-    });
-    expect(guard(input('t.f2')).effect).toBe('deny');
   });
 });
