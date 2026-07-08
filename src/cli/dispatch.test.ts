@@ -316,6 +316,35 @@ describe('CLI scope enforcement', () => {
     }
   });
 
+  it('group: blocks harness_capabilities escalation', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    const resp = await dispatch(
+      { id: '1', command: 'groups-test', args: { harness_capabilities: 'agent-teams=on' } },
+      agentCtx(),
+    );
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.code).toBe('forbidden');
+      expect(resp.error.message).toContain('harness_capabilities');
+    }
+  });
+
+  it('group: blocks harness-capabilities escalation (hyphenated)', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    const resp = await dispatch(
+      { id: '1', command: 'groups-test', args: { 'harness-capabilities': 'workflow=on' } },
+      agentCtx(),
+    );
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.code).toBe('forbidden');
+    }
+  });
+
   it('group: blocks non-group resources', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
 

@@ -13,11 +13,25 @@ import {
   updateContainerConfigJson,
 } from '../../db/container-configs.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
+import { parseHarnessCapabilitiesArg, resolveHarnessCapabilities } from '../../harness-capabilities.js';
 import type { AgentGroup, ContainerConfigRow } from '../../types.js';
 import { registerResource } from '../crud.js';
 
+/** Raw override map from the stored JSON; malformed degrades to {} (resolve warns). */
+function harnessOverrides(row: ContainerConfigRow): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(row.harness_capabilities);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+    return {};
+  }
+}
+
 /** Deserialize JSON columns for display. */
 function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
+  const overrides = harnessOverrides(row);
+  const resolved = resolveHarnessCapabilities(row.harness_capabilities);
   return {
     agent_group_id: row.agent_group_id,
     provider: row.provider,
@@ -32,6 +46,10 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     packages_npm: JSON.parse(row.packages_npm),
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
+    harness_capabilities: overrides,
+    harness_capabilities_resolved: Object.fromEntries(
+      Object.entries(resolved).map(([k, v]) => [k, `${v} (${k in overrides ? 'override' : 'default'})`]),
+    ),
     updated_at: row.updated_at,
   };
 }
@@ -242,8 +260,9 @@ registerResource({
     'config update': {
       access: 'approval',
       description:
-        'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
+        'Update container config fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
+        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        "--harness-capabilities 'key=on|off|default[,key=...]' (keys: agent-teams, workflow; `default` clears the per-group override).",
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -271,13 +290,26 @@ registerResource({
           updates.cli_scope = scope;
         }
 
-        if (Object.keys(updates).length === 0) {
+        // Harness capabilities are a JSON column of sparse overrides — apply
+        // set/clear ops on the stored map (`default` clears; never stored).
+        let harnessChanged = false;
+        const capsArg = (args['harness-capabilities'] ?? args.harness_capabilities) as string | undefined;
+        if (capsArg !== undefined) {
+          const ops = parseHarnessCapabilitiesArg(String(capsArg));
+          const overrides = harnessOverrides(row);
+          for (const key of ops.clear) delete overrides[key];
+          Object.assign(overrides, ops.set);
+          updateContainerConfigJson(id, 'harness_capabilities', overrides);
+          harnessChanged = true;
+        }
+
+        if (Object.keys(updates).length === 0 && !harnessChanged) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --harness-capabilities',
           );
         }
 
-        updateContainerConfigScalars(id, updates);
+        if (Object.keys(updates).length > 0) updateContainerConfigScalars(id, updates);
 
         const updated = getContainerConfig(id)!;
         return presentConfig(updated);

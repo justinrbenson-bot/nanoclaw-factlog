@@ -91,6 +91,13 @@ export async function dispatch(
         return err(req.id, 'forbidden', 'Cannot change cli_scope from a group-scoped agent.');
       }
 
+      // Same escalation shape for harness capabilities: an agent must not be
+      // able to re-enable harness features (agent teams, Workflow) that the
+      // operator turned off for its group.
+      if (req.args.harness_capabilities !== undefined || req.args['harness-capabilities'] !== undefined) {
+        return err(req.id, 'forbidden', 'Cannot change harness_capabilities from a group-scoped agent.');
+      }
+
       // Auto-fill agent-group-related args so the agent doesn't need
       // to pass its own group ID explicitly.
       const fill: Record<string, unknown> = {
