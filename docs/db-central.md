@@ -320,12 +320,14 @@ CREATE TABLE container_configs (
   packages_npm           TEXT NOT NULL DEFAULT '[]',
   additional_mounts      TEXT NOT NULL DEFAULT '[]',
   cli_scope              TEXT NOT NULL DEFAULT 'group',   -- disabled | group | global
+  harness_capabilities   TEXT NOT NULL DEFAULT '{}',      -- sparse overrides: {"agent-teams"|"workflow": "on"|"off"}
   updated_at             TEXT NOT NULL
 );
 ```
 
 - **Readers:** `src/container-config.ts`, `src/container-runner.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts`
 - **Writers:** `src/db/container-configs.ts`, `src/modules/self-mod/apply.ts`, `src/backfill-container-configs.ts`
+- `harness_capabilities` stores per-group overrides only; code defaults + resolution live in `src/harness-capabilities.ts` (see [harness-capabilities.md](harness-capabilities.md))
 
 ### 1.16 `pending_sender_approvals`
 
@@ -425,6 +427,7 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 | 16 | `messaging-group-instance` | `016-messaging-group-instance.ts` | `messaging_groups` gets an `instance` column (adapter-instance dimension); table recreate (`disableForeignKeys: true`) backfills `instance = channel_type` on every existing row and relaxes the `UNIQUE` to `(channel_type, platform_id, instance)` |
 | 17 | `agent-message-policies` | `017-agent-message-policies.ts` | `agent_message_policies` (see §1.18) |
 | 18 | `approvals-approver-user-id` | `018-approvals-approver-user-id.ts` | `pending_approvals.approver_user_id` — names a single required approver for a2a message-gate policies |
+| 19 | `harness-capabilities` | `019-harness-capabilities.ts` | `ALTER TABLE container_configs ADD COLUMN harness_capabilities` — per-group harness toggles (see [harness-capabilities.md](harness-capabilities.md)) |
 
 Numbers 5 and 6 are intentionally absent — migrations were renumbered during early development.
 

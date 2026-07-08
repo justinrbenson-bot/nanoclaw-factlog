@@ -73,6 +73,7 @@ For ad-hoc queries from skills or scripts, use the in-tree wrapper rather than t
 | `src/modules/permissions/user-dm.ts` | Cold-DM resolution + `user_dms` cache |
 | `src/group-init.ts` | Per-agent-group filesystem scaffold (CLAUDE.md, skills) — agent-runner source is a shared read-only mount, not copied per group |
 | `src/db/container-configs.ts` | CRUD for `container_configs` table (per-group container runtime config) |
+| `src/harness-capabilities.ts` | Harness-capability registry — `agent-teams`/`workflow` toggles (both default off), resolved into `container.json`; settings reconciler lives in `group-init.ts`. See [docs/harness-capabilities.md](docs/harness-capabilities.md) |
 | `src/backfill-container-configs.ts` | Migrates legacy `container.json` files into the DB on startup |
 | `src/container-restart.ts` | Kill + on-wake respawn for agent group containers |
 | `src/db/` | DB layer — agent_groups, messaging_groups, sessions, container_configs, user_roles, user_dms, pending_*, migrations |
@@ -138,7 +139,7 @@ Per-agent-group container runtime config (provider, model, packages, MCP servers
 | Value | Behavior |
 |-------|----------|
 | `disabled` | Agent never learns about ncl (instructions excluded from CLAUDE.md). Host dispatch rejects any `cli_request`. |
-| `group` (default) | Agent can access `groups`, `sessions`, `destinations`, `members`, `tasks` only, scoped to its own agent group. `--id` and group args are auto-filled. Cross-group access rejected. `cli_scope` changes blocked. |
+| `group` (default) | Agent can access `groups`, `sessions`, `destinations`, `members`, `tasks` only, scoped to its own agent group. `--id` and group args are auto-filled. Cross-group access rejected. `cli_scope` and `harness_capabilities` changes blocked. |
 | `global` | Unrestricted. Set automatically for owner agent groups via `init-first-agent`. |
 
 Key files: `src/db/container-configs.ts`, `src/container-config.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts` (instructions exclusion).
