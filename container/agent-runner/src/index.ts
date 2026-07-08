@@ -94,6 +94,7 @@ async function main(): Promise<void> {
     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
     model: config.model,
     effort: config.effort,
+    harnessCapabilities: config.harnessCapabilities,
   });
 
   // Providers that lack native memory opt in via `usesMemoryScaffold`; for them

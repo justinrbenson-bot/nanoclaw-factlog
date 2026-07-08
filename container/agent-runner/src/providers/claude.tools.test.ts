@@ -74,4 +74,14 @@ describe('sdk tool-surface drift guard', () => {
       ).toBe(false);
     }
   });
+
+  it('capability-managed tools exist on the surface', () => {
+    // Workflow (the `workflow` capability) and DesignSync (fixed-off) must be
+    // real tools for the disallow/settings mechanisms to be doing anything.
+    for (const name of ['Workflow', 'DesignSync']) {
+      expect(baselineTools.has(name), `'${name}' vanished from the surface — re-audit its capability mapping`).toBe(
+        true,
+      );
+    }
+  });
 });

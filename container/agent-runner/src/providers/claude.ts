@@ -23,6 +23,8 @@ function log(msg: string): void {
 //   the question and blocks on the real reply.
 // - EnterPlanMode / ExitPlanMode / EnterWorktree / ExitWorktree: Claude
 //   Code UI affordances; in a headless container they'd appear stuck.
+// - DesignSync: desktop design-tool integration — nothing to sync with in a
+//   headless container, and a ~9.3KB/turn schema (wire-measured).
 export const SDK_DISALLOWED_TOOLS = [
   'CronCreate',
   'CronDelete',
@@ -33,7 +35,23 @@ export const SDK_DISALLOWED_TOOLS = [
   'ExitPlanMode',
   'EnterWorktree',
   'ExitWorktree',
+  'DesignSync',
 ];
+
+/**
+ * Effective disallow list for a provider instance: the fixed set plus
+ * capability-driven entries from the group's resolved harness-capability map
+ * (container.json, resolved host-side — see src/harness-capabilities.ts on
+ * the host). `workflow` off — the default — adds `Workflow` as
+ * defense-in-depth: the primary OFF mechanism is the host-reconciled
+ * `disableWorkflows` settings key, and this backstop covers a malformed or
+ * hand-reverted settings.json. Absent or unknown state fails closed.
+ */
+export function buildDisallowedTools(caps?: Record<string, string>): string[] {
+  const list = [...SDK_DISALLOWED_TOOLS];
+  if (caps?.workflow !== 'on') list.push('Workflow');
+  return list;
+}
 
 // Pre-approved tool set for NanoClaw agent containers. `allowedTools` is fully
 // INERT on the pinned CLI under this runner's `bypassPermissions`: the wire
@@ -154,31 +172,35 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
 }
 
 /**
- * PreToolUse hook: record the current tool + its declared timeout so the host
- * sweep can widen its stuck tolerance while Bash is running a long-declared
- * script. Defense-in-depth: if SDK_DISALLOWED_TOOLS slips through somehow,
- * block the call here instead of letting the agent hang.
+ * PreToolUse hook factory: record the current tool + its declared timeout so
+ * the host sweep can widen its stuck tolerance while Bash is running a
+ * long-declared script. Defense-in-depth: if a disallowed tool slips through
+ * somehow, block the call here instead of letting the agent hang. A factory
+ * (like createPreCompactHook) because the blocklist is per-instance — it
+ * depends on the group's resolved harness capabilities.
  */
-const preToolUseHook: HookCallback = async (input) => {
-  const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
-  const toolName = i.tool_name ?? '';
-  if (SDK_DISALLOWED_TOOLS.includes(toolName)) {
-    return {
-      decision: 'block',
-      stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,
-    } as unknown as ReturnType<HookCallback>;
-  }
-  // Bash exposes its timeout via the tool_input.timeout field (ms). Any other
-  // tool: no declared timeout.
-  const declaredTimeoutMs =
-    toolName === 'Bash' && typeof i.tool_input?.timeout === 'number' ? (i.tool_input.timeout as number) : null;
-  try {
-    setContainerToolInFlight(toolName, declaredTimeoutMs);
-  } catch (err) {
-    log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return { continue: true };
-};
+export function createPreToolUseHook(blockedTools: string[]): HookCallback {
+  return async (input) => {
+    const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
+    const toolName = i.tool_name ?? '';
+    if (blockedTools.includes(toolName)) {
+      return {
+        decision: 'block',
+        stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,
+      } as unknown as ReturnType<HookCallback>;
+    }
+    // Bash exposes its timeout via the tool_input.timeout field (ms). Any other
+    // tool: no declared timeout.
+    const declaredTimeoutMs =
+      toolName === 'Bash' && typeof i.tool_input?.timeout === 'number' ? (i.tool_input.timeout as number) : null;
+    try {
+      setContainerToolInFlight(toolName, declaredTimeoutMs);
+    } catch (err) {
+      log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return { continue: true };
+  };
+}
 
 /** Clear in-flight tool on PostToolUse / PostToolUseFailure. */
 const postToolUseHook: HookCallback = async () => {
@@ -338,6 +360,7 @@ export class ClaudeProvider implements AgentProvider {
   private additionalDirectories?: string[];
   private model?: string;
   private effort?: string;
+  private disallowedTools: string[];
 
   constructor(options: ProviderOptions = {}) {
     this.assistantName = options.assistantName;
@@ -349,6 +372,13 @@ export class ClaudeProvider implements AgentProvider {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
     };
+    this.disallowedTools = buildDisallowedTools(options.harnessCapabilities);
+    // 'agent-teams' is host-settings-managed — no runner mechanism, but it is
+    // a known key; warning on it would fire for every group on every boot.
+    const knownKeys = new Set(['agent-teams', 'workflow']);
+    for (const key of Object.keys(options.harnessCapabilities ?? {})) {
+      if (!knownKeys.has(key)) log(`Unknown harness capability key (no claude-provider mechanism): ${key}`);
+    }
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -409,7 +439,7 @@ export class ClaudeProvider implements AgentProvider {
           ...TOOL_ALLOWLIST,
           ...Object.keys(this.mcpServers).map(mcpAllowPattern),
         ],
-        disallowedTools: SDK_DISALLOWED_TOOLS,
+        disallowedTools: this.disallowedTools,
         env: this.env,
         model: this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -419,7 +449,7 @@ export class ClaudeProvider implements AgentProvider {
         settingSources: ['project', 'user', 'local'],
         mcpServers: this.mcpServers,
         hooks: {
-          PreToolUse: [{ hooks: [preToolUseHook] }],
+          PreToolUse: [{ hooks: [createPreToolUseHook(this.disallowedTools)] }],
           PostToolUse: [{ hooks: [postToolUseHook] }],
           PostToolUseFailure: [{ hooks: [postToolUseHook] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],

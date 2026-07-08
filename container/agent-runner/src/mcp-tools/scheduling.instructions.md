@@ -4,6 +4,8 @@ Use `ncl tasks` for one-shot and recurring tasks. A task runs in this agent grou
 
 Pass `--name "<short label>"` on create to get a readable task id (e.g. `--name "sales briefing"` → `sales-briefing-a25c`); without it ids are `t-<hex>`.
 
+Note: your in-session task-list tools (TaskCreate/TaskUpdate/TaskList) are per-conversation scratch for organizing the current turn's work — they are unrelated to `ncl tasks` scheduled tasks and do not survive the session.
+
 Common commands:
 
 ```bash

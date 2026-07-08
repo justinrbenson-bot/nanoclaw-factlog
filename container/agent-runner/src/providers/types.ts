@@ -79,6 +79,12 @@ export interface ProviderOptions {
    * through to the underlying SDK. If omitted, the SDK default is used.
    */
   effort?: string;
+  /**
+   * RESOLVED harness-capability map from container.json (key → 'on'|'off',
+   * resolved host-side against code defaults). Providers map keys to their
+   * own mechanisms and may ignore the map entirely; absent means all-off.
+   */
+  harnessCapabilities?: Record<string, string>;
 }
 
 export interface QueryInput {
