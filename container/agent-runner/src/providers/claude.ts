@@ -23,7 +23,7 @@ function log(msg: string): void {
 //   the question and blocks on the real reply.
 // - EnterPlanMode / ExitPlanMode / EnterWorktree / ExitWorktree: Claude
 //   Code UI affordances; in a headless container they'd appear stuck.
-const SDK_DISALLOWED_TOOLS = [
+export const SDK_DISALLOWED_TOOLS = [
   'CronCreate',
   'CronDelete',
   'CronList',
@@ -35,30 +35,31 @@ const SDK_DISALLOWED_TOOLS = [
   'ExitWorktree',
 ];
 
-// Tool allowlist for NanoClaw agent containers. MCP-tool entries are derived
-// at the call site from the registered `mcpServers` map so that any server
-// added via `add_mcp_server` (or wired in container.json directly) is
-// reachable to the agent — without this, the SDK's allowedTools filter
-// silently drops every MCP namespace not listed here.
-const TOOL_ALLOWLIST = [
+// Pre-approved tool set for NanoClaw agent containers. `allowedTools` is fully
+// INERT on the pinned CLI under this runner's `bypassPermissions`: the wire
+// tool surface is byte-identical whether this list is passed or omitted
+// entirely (wire-captured — the fixture's `tools` and `toolsBare` are equal;
+// claude.tools.test.ts asserts it). It neither filters nor promotes tools; its
+// only role is a permission auto-approve list, which bypassPermissions moots.
+// Kept as the accurate pre-approval set for a hypothetical non-bypass mode, and
+// because the per-server `mcpAllowPattern` entries derived at the call site
+// are retained (MCP invocation-gating under non-bypass modes is unverified).
+// Exported for the fixture regenerator and tests.
+export const TOOL_ALLOWLIST = [
+  'Agent',
   'Bash',
-  'Read',
-  'Write',
   'Edit',
   'Glob',
   'Grep',
-  'WebSearch',
-  'WebFetch',
-  'Task',
+  'NotebookEdit',
+  'Read',
+  'SendMessage',
+  'Skill',
   'TaskOutput',
   'TaskStop',
-  'TeamCreate',
-  'TeamDelete',
-  'SendMessage',
-  'TodoWrite',
-  'ToolSearch',
-  'Skill',
-  'NotebookEdit',
+  'WebFetch',
+  'WebSearch',
+  'Write',
 ];
 
 // MCP server names are sanitized by the SDK when forming tool prefixes:
