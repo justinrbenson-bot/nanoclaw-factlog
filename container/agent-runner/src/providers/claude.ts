@@ -25,6 +25,8 @@ function log(msg: string): void {
 //   Code UI affordances; in a headless container they'd appear stuck.
 // - DesignSync: desktop design-tool integration — nothing to sync with in a
 //   headless container, and a ~9.3KB/turn schema (wire-measured).
+// - ReportFindings: code-review-reporting UI affordance with no headless host
+//   surface to receive it (~1.9KB/turn schema).
 export const SDK_DISALLOWED_TOOLS = [
   'CronCreate',
   'CronDelete',
@@ -36,20 +38,33 @@ export const SDK_DISALLOWED_TOOLS = [
   'EnterWorktree',
   'ExitWorktree',
   'DesignSync',
+  'ReportFindings',
 ];
 
 /**
- * Effective disallow list for a provider instance: the fixed set plus
- * capability-driven entries from the group's resolved harness-capability map
- * (container.json, resolved host-side — see src/harness-capabilities.ts on
- * the host). `workflow` off — the default — adds `Workflow` as
- * defense-in-depth: the primary OFF mechanism is the host-reconciled
- * `disableWorkflows` settings key, and this backstop covers a malformed or
- * hand-reverted settings.json. Absent or unknown state fails closed.
+ * Configurable capabilities that block a harness tool when OFF, mapped to the
+ * tool name. This is the runner half of the capability contract (the host half
+ * is the settings reconciler); it is genuinely runner-specific because
+ * `disallowedTools` is a Claude concept the host tree can't name. The block is
+ * defense-in-depth — the primary OFF mechanism is the host-reconciled settings
+ * key — covering a malformed or hand-reverted settings.json.
+ */
+const CAPABILITY_DISALLOWS: Record<string, string> = {
+  workflow: 'Workflow',
+};
+
+/**
+ * Effective disallow list for a provider instance: the fixed set plus, for each
+ * capability in CAPABILITY_DISALLOWS whose resolved state is not explicitly
+ * `on`, its tool. Absent or unexpected state fails closed (tool stays blocked).
+ * `caps` is the resolved map from container.json (host-resolved: only known
+ * keys, valid values).
  */
 export function buildDisallowedTools(caps?: Record<string, string>): string[] {
   const list = [...SDK_DISALLOWED_TOOLS];
-  if (caps?.workflow !== 'on') list.push('Workflow');
+  for (const [key, tool] of Object.entries(CAPABILITY_DISALLOWS)) {
+    if (caps?.[key] !== 'on') list.push(tool);
+  }
   return list;
 }
 
@@ -179,11 +194,12 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
  * (like createPreCompactHook) because the blocklist is per-instance — it
  * depends on the group's resolved harness capabilities.
  */
-export function createPreToolUseHook(blockedTools: string[]): HookCallback {
+export function createPreToolUseHook(blockedTools: Iterable<string>): HookCallback {
+  const blocked = new Set(blockedTools);
   return async (input) => {
     const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
     const toolName = i.tool_name ?? '';
-    if (blockedTools.includes(toolName)) {
+    if (blocked.has(toolName)) {
       return {
         decision: 'block',
         stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,
@@ -361,6 +377,7 @@ export class ClaudeProvider implements AgentProvider {
   private model?: string;
   private effort?: string;
   private disallowedTools: string[];
+  private preToolUseHook: HookCallback;
 
   constructor(options: ProviderOptions = {}) {
     this.assistantName = options.assistantName;
@@ -372,13 +389,12 @@ export class ClaudeProvider implements AgentProvider {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
     };
+    // The resolved harness-capability map in container.json is host-resolved:
+    // only known keys with valid values reach here, so the runner never has to
+    // reason about unknown keys. Blocklist + hook are per-instance but immutable
+    // after construction — build both once.
     this.disallowedTools = buildDisallowedTools(options.harnessCapabilities);
-    // 'agent-teams' is host-settings-managed — no runner mechanism, but it is
-    // a known key; warning on it would fire for every group on every boot.
-    const knownKeys = new Set(['agent-teams', 'workflow']);
-    for (const key of Object.keys(options.harnessCapabilities ?? {})) {
-      if (!knownKeys.has(key)) log(`Unknown harness capability key (no claude-provider mechanism): ${key}`);
-    }
+    this.preToolUseHook = createPreToolUseHook(this.disallowedTools);
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -449,7 +465,7 @@ export class ClaudeProvider implements AgentProvider {
         settingSources: ['project', 'user', 'local'],
         mcpServers: this.mcpServers,
         hooks: {
-          PreToolUse: [{ hooks: [createPreToolUseHook(this.disallowedTools)] }],
+          PreToolUse: [{ hooks: [this.preToolUseHook] }],
           PostToolUse: [{ hooks: [postToolUseHook] }],
           PostToolUseFailure: [{ hooks: [postToolUseHook] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],

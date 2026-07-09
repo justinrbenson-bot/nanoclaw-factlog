@@ -23,7 +23,12 @@ ncl groups config update --id <group-id> --harness-capabilities 'workflow=on,age
 ncl groups restart --id <group-id>                                       # apply
 ```
 
-`default` clears the per-group override (it is never stored). Changes from inside a container are rejected — like `cli_scope`, this is operator-only.
+`default` clears the per-group override (it is never stored). Config changes through `ncl` from inside a container are rejected — like `cli_scope`, the sanctioned/persistent path is operator-only.
+
+### Enforcement strength (be precise about the boundary)
+
+- **`workflow` off** has two independent locks: the reconciled `disableWorkflows` settings key *and* a runner-side `disallowedTools` block. The tool cannot come back inside a running container even if the settings file is edited.
+- **`agent-teams` off** has only one mechanism: the absence of the env key from the group's `settings.json`. That file is mounted **read-write** into the container (the CLI needs to write transcripts there), and `settingSources` also loads project/local settings from the agent-writable workspace. So an agent that actively rewrites its own settings can re-enable teams **for the current container lifetime**, until the next spawn re-reconciles it. Treat `agent-teams=off` as **configuration hygiene enforced at spawn**, not a hard adversarial boundary inside a live container — the real trust boundary remains the container sandbox + OneCLI. A follow-up ([nanocoai/nanoclaw#TBD](https://github.com/nanocoai/nanoclaw/issues)) will mount the managed settings source read-only to close this.
 
 ## [BREAKING] Agent teams default off
 

@@ -28,30 +28,47 @@ describe('resolveHarnessCapabilities', () => {
     expect(resolveHarnessCapabilities('"off"')).toEqual(HARNESS_CAPABILITY_DEFAULTS);
   });
 
-  it('passes unknown keys through and keeps defaults for garbage values on known keys', () => {
-    const resolved = resolveHarnessCapabilities('{"monitor":"off","workflow":"sideways"}');
-    expect(resolved.monitor).toBe('off');
+  it('drops unknown keys and garbage values back to defaults (never leaks into the resolved map)', () => {
+    const resolved = resolveHarnessCapabilities('{"monitor":"off","workflow":"sideways","future":{"nested":1}}');
+    expect(Object.hasOwn(resolved, 'monitor')).toBe(false); // unknown key dropped
+    expect(Object.hasOwn(resolved, 'future')).toBe(false); // unknown non-string dropped
     expect(resolved.workflow).toBe('off'); // garbage value → default, not 'sideways'
     expect(resolved['agent-teams']).toBe('off');
+  });
+
+  it('accepts an already-parsed override map', () => {
+    expect(resolveHarnessCapabilities({ workflow: 'on' })).toEqual({ 'agent-teams': 'off', workflow: 'on' });
+  });
+
+  it('does not treat inherited Object.prototype names as known keys', () => {
+    // `key in obj` would be true for 'constructor'/'toString'; Object.hasOwn is not.
+    const resolved = resolveHarnessCapabilities('{"constructor":"on","toString":"off"}');
+    expect(resolved).toEqual({ 'agent-teams': 'off', workflow: 'off' });
   });
 });
 
 describe('parseHarnessCapabilitiesArg', () => {
-  it('parses set and clear operations', () => {
-    expect(parseHarnessCapabilitiesArg('agent-teams=on')).toEqual({ set: { 'agent-teams': 'on' }, clear: [] });
-    expect(parseHarnessCapabilitiesArg('workflow=default')).toEqual({ set: {}, clear: ['workflow'] });
+  it('parses on/off/default directives into a key→directive map', () => {
+    expect(parseHarnessCapabilitiesArg('agent-teams=on')).toEqual({ 'agent-teams': 'on' });
+    expect(parseHarnessCapabilitiesArg('workflow=default')).toEqual({ workflow: 'default' });
     expect(parseHarnessCapabilitiesArg('agent-teams=on, workflow=default')).toEqual({
-      set: { 'agent-teams': 'on' },
-      clear: ['workflow'],
+      'agent-teams': 'on',
+      workflow: 'default',
     });
   });
 
-  it('normalizes key case and underscores', () => {
-    expect(parseHarnessCapabilitiesArg('AGENT_TEAMS=ON')).toEqual({ set: { 'agent-teams': 'on' }, clear: [] });
+  it('resolves a repeated key last-wins', () => {
+    expect(parseHarnessCapabilitiesArg('workflow=on,workflow=default')).toEqual({ workflow: 'default' });
+    expect(parseHarnessCapabilitiesArg('workflow=default,workflow=on')).toEqual({ workflow: 'on' });
   });
 
-  it('rejects unknown keys with the allowed set in the message', () => {
+  it('normalizes key case and underscores', () => {
+    expect(parseHarnessCapabilitiesArg('AGENT_TEAMS=ON')).toEqual({ 'agent-teams': 'on' });
+  });
+
+  it('rejects unknown keys, including inherited prototype names', () => {
     expect(() => parseHarnessCapabilitiesArg('web=off')).toThrow(/unknown harness capability "web".*agent-teams/);
+    expect(() => parseHarnessCapabilitiesArg('constructor=on')).toThrow(/unknown harness capability "constructor"/);
   });
 
   it('rejects bad values and malformed pairs', () => {

@@ -23,7 +23,7 @@ vi.mock('../../config.js', async () => {
 const TEST_DIR = '/tmp/nanoclaw-test-cli-groups-config';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
-import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
+import { ensureContainerConfig, getContainerConfig, updateContainerConfigJson } from '../../db/container-configs.js';
 import { dispatch } from '../dispatch.js';
 // Side-effect import: registers the `groups-*` commands.
 import './groups.js';
@@ -58,30 +58,32 @@ afterEach(() => {
 });
 
 describe('groups config update --harness-capabilities', () => {
-  it('sets an override and renders it as (override) in the resolved view', async () => {
+  type Resolved = Record<string, { state: string; source: string }>;
+
+  it('sets an override and marks it as an override in the resolved view', async () => {
     const resp = await configUpdate('agent-teams=on');
 
     expect(resp.ok).toBe(true);
     if (resp.ok) {
       const data = resp.data as {
         harness_capabilities: Record<string, string>;
-        harness_capabilities_resolved: Record<string, string>;
+        harness_capabilities_resolved: Resolved;
       };
       expect(data.harness_capabilities).toEqual({ 'agent-teams': 'on' });
-      expect(data.harness_capabilities_resolved['agent-teams']).toBe('on (override)');
-      expect(data.harness_capabilities_resolved.workflow).toBe('off (default)');
+      expect(data.harness_capabilities_resolved['agent-teams']).toEqual({ state: 'on', source: 'override' });
+      expect(data.harness_capabilities_resolved.workflow).toEqual({ state: 'off', source: 'default' });
     }
     expect(JSON.parse(getContainerConfig(GID)!.harness_capabilities)).toEqual({ 'agent-teams': 'on' });
   });
 
-  it('`default` clears the override and the resolved view returns to (default)', async () => {
+  it('`default` clears the override and the resolved view returns to default', async () => {
     await configUpdate('agent-teams=on');
     const resp = await configUpdate('agent-teams=default');
 
     expect(resp.ok).toBe(true);
     if (resp.ok) {
-      const data = resp.data as { harness_capabilities_resolved: Record<string, string> };
-      expect(data.harness_capabilities_resolved['agent-teams']).toBe('off (default)');
+      const data = resp.data as { harness_capabilities_resolved: Resolved };
+      expect(data.harness_capabilities_resolved['agent-teams']).toEqual({ state: 'off', source: 'default' });
     }
     expect(JSON.parse(getContainerConfig(GID)!.harness_capabilities)).toEqual({});
   });
@@ -109,13 +111,25 @@ describe('groups config update --harness-capabilities', () => {
     if (resp.ok) {
       const data = resp.data as {
         harness_capabilities: Record<string, string>;
-        harness_capabilities_resolved: Record<string, string>;
+        harness_capabilities_resolved: Resolved;
       };
       expect(data.harness_capabilities).toEqual({ workflow: 'on' });
       expect(data.harness_capabilities_resolved).toEqual({
-        'agent-teams': 'off (default)',
-        workflow: 'on (override)',
+        'agent-teams': { state: 'off', source: 'default' },
+        workflow: { state: 'on', source: 'override' },
       });
+    }
+  });
+
+  it('a stored invalid value reports source=default, not a lying override', async () => {
+    // Direct DB write bypassing validation (version skew / manual edit).
+    updateContainerConfigJson(GID, 'harness_capabilities', { workflow: 'sideways' });
+    const resp = await dispatch({ id: 't', command: 'groups-config-get', args: { id: GID } }, hostCtx);
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) {
+      const data = resp.data as { harness_capabilities_resolved: Resolved };
+      expect(data.harness_capabilities_resolved.workflow).toEqual({ state: 'off', source: 'default' });
     }
   });
 });

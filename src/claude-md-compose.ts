@@ -222,7 +222,7 @@ function syncSymlink(linkPath: string, target: string): void {
   fs.symlinkSync(target, linkPath);
 }
 
-function writeAtomic(filePath: string, content: string): void {
+export function writeAtomic(filePath: string, content: string): void {
   const tmp = `${filePath}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, content);
   fs.renameSync(tmp, filePath);

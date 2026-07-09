@@ -1,39 +1,30 @@
 import fs from 'fs';
 import path from 'path';
 
+import { writeAtomic } from './claude-md-compose.js';
 import { DATA_DIR, GROUPS_DIR } from './config.js';
 import { ensureContainerConfig } from './db/container-configs.js';
+import { HARNESS_CAPABILITIES } from './harness-capabilities.js';
 import { log } from './log.js';
 import { providerProvidesAgentSurfaces } from './providers/provider-container-registry.js';
 import type { HarnessCapabilityState } from './harness-capabilities.js';
 import type { AgentGroup } from './types.js';
 
-// Managed harness keys (the teams env key, disableWorkflows) are deliberately
-// NOT in the static default — they enter settings.json exclusively through
-// reconcileHarnessSettings() from the group's resolved capability state.
-const DEFAULT_SETTINGS_JSON =
-  JSON.stringify(
-    {
-      env: {
-        CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-        CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-      },
-      hooks: {
-        PreCompact: [
-          {
-            hooks: [
-              {
-                type: 'command',
-                command: 'bun /app/src/compact-instructions.ts',
-              },
-            ],
-          },
-        ],
-      },
-    },
-    null,
-    2,
-  ) + '\n';
+const PRE_COMPACT_COMMAND = 'bun /app/src/compact-instructions.ts';
+
+// Base settings for a brand-new group. Managed harness keys (the teams env key,
+// disableWorkflows) are deliberately NOT here — they enter settings.json
+// exclusively through the reconciler from the group's resolved capability state,
+// applied on top of this base in the same write.
+const DEFAULT_SETTINGS = {
+  env: {
+    CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+  },
+  hooks: {
+    PreCompact: [{ hooks: [{ type: 'command', command: PRE_COMPACT_COMMAND }] }],
+  },
+};
 
 /**
  * Initialize the on-disk filesystem state for an agent group. Idempotent —
@@ -127,19 +118,7 @@ export function initGroupFilesystem(
     }
 
     const settingsFile = path.join(claudeDir, 'settings.json');
-    if (!fs.existsSync(settingsFile)) {
-      fs.writeFileSync(settingsFile, DEFAULT_SETTINGS_JSON);
-      initialized.push('settings.json');
-    } else {
-      ensurePreCompactHook(settingsFile, initialized);
-    }
-
-    // Runs in BOTH branches: a freshly written default must be reconciled in
-    // the same call, or the group's first container lifetime ships without
-    // its capability state (the default file deliberately omits managed keys).
-    if (opts?.harnessCapabilities) {
-      reconcileHarnessSettings(settingsFile, opts.harnessCapabilities, initialized);
-    }
+    applyGroupSettings(settingsFile, opts?.harnessCapabilities, initialized);
 
     // Skills directory — created empty here; symlinks are synced at spawn
     // time by container-runner.ts based on container.json skills selection.
@@ -160,87 +139,95 @@ export function initGroupFilesystem(
   }
 }
 
-const PRE_COMPACT_COMMAND = 'bun /app/src/compact-instructions.ts';
+type SettingsObject = Record<string, unknown>;
 
-/**
- * Patch an existing settings.json to add the PreCompact hook if missing.
- * Runs on every group init so pre-existing groups pick up the hook.
- */
-function ensurePreCompactHook(settingsFile: string, initialized: string[]): void {
-  try {
-    const raw = fs.readFileSync(settingsFile, 'utf-8');
-    const settings = JSON.parse(raw);
-
-    // Check if there's already a PreCompact hook with our command.
-    const existing = settings.hooks?.PreCompact as unknown[] | undefined;
-    if (existing && JSON.stringify(existing).includes(PRE_COMPACT_COMMAND)) return;
-
-    // Add the hook, preserving existing hooks.
-    if (!settings.hooks) settings.hooks = {};
-    if (!settings.hooks.PreCompact) settings.hooks.PreCompact = [];
-    settings.hooks.PreCompact.push({
-      hooks: [{ type: 'command', command: PRE_COMPACT_COMMAND }],
-    });
-
-    fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
-    initialized.push('settings.json (added PreCompact hook)');
-  } catch {
-    // Don't break init if settings.json is malformed — it'll use whatever's there.
-  }
+function asObject(value: unknown): SettingsObject | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as SettingsObject) : null;
 }
 
-const TEAMS_ENV_KEY = 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS';
-
 /**
- * Reconcile the managed harness-capability keys in settings.json to the
- * group's resolved capability state. Manages exactly two keys — the
- * agent-teams env key and `disableWorkflows` — adding AND removing them;
- * everything else in the file (operator hand-edits, the PreCompact hook,
- * unmanaged env keys) is preserved verbatim. Runs on every spawn, so
- * pre-existing groups converge to the configured state, including removal
- * of the legacy always-on teams key. See docs/harness-capabilities.md.
+ * Bring a group's settings.json to its desired state in a single read-modify-
+ * write: ensure the PreCompact hook is present and reconcile the managed
+ * harness-capability keys to `caps`. A fresh file is composed from
+ * DEFAULT_SETTINGS + the capability keys in one atomic write; an existing file
+ * is mutated in memory and rewritten only if it changed. Any content that isn't
+ * a JSON object (malformed, `null`, a scalar, an array) is left untouched with
+ * a warning — settings trouble must never break group init or block a spawn.
  */
-function reconcileHarnessSettings(
+function applyGroupSettings(
   settingsFile: string,
-  caps: Record<string, HarnessCapabilityState>,
+  caps: Record<string, HarnessCapabilityState> | undefined,
   initialized: string[],
 ): void {
+  if (!fs.existsSync(settingsFile)) {
+    const settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as SettingsObject;
+    reconcileHarnessKeys(settings, caps);
+    writeAtomic(settingsFile, JSON.stringify(settings, null, 2) + '\n');
+    initialized.push('settings.json');
+    return;
+  }
+
+  let raw: string;
+  let parsed: unknown;
   try {
-    const raw = fs.readFileSync(settingsFile, 'utf-8');
-    const settings = JSON.parse(raw) as Record<string, unknown> & { env?: Record<string, unknown> };
-
-    // agent-teams: the settings env key is the ONLY working switch on the
-    // pinned CLI — settings env strictly beats SDK options env, so presence
-    // in this file IS the state.
-    if (caps['agent-teams'] === 'on') {
-      if (!settings.env) settings.env = {};
-      settings.env[TEAMS_ENV_KEY] = '1';
-    } else if (settings.env && TEAMS_ENV_KEY in settings.env) {
-      delete settings.env[TEAMS_ENV_KEY];
-    }
-
-    // workflow: disableWorkflows removes the Workflow tool AND its agent-types
-    // catalog block from every request. The runner's disallowedTools backstop
-    // covers a malformed or hand-reverted file — that backstop is what makes
-    // the warn-and-continue below acceptable.
-    if (caps.workflow === 'off') {
-      settings.disableWorkflows = true;
-    } else if ('disableWorkflows' in settings) {
-      delete settings.disableWorkflows;
-    }
-
-    const next = JSON.stringify(settings, null, 2) + '\n';
-    if (next === raw) return; // no churn on the every-spawn path
-
-    // tmp+rename: two sessions of one group can spawn concurrently; both
-    // compute identical output from the same DB row, so last-rename-wins is
-    // harmless — but a torn write mid-read by the CLI would not be.
-    const tmp = `${settingsFile}.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, next);
-    fs.renameSync(tmp, settingsFile);
-    initialized.push('settings.json (reconciled harness capabilities)');
+    raw = fs.readFileSync(settingsFile, 'utf-8');
+    parsed = JSON.parse(raw);
   } catch (err) {
     if (!(err instanceof SyntaxError)) throw err;
-    log.warn('settings.json is malformed — skipping harness-capability reconcile', { settingsFile });
+    log.warn('settings.json is malformed — leaving it untouched', { settingsFile });
+    return;
+  }
+  const settings = asObject(parsed);
+  if (!settings) {
+    log.warn('settings.json is not a JSON object — leaving it untouched', { settingsFile });
+    return;
+  }
+
+  ensurePreCompactHook(settings);
+  reconcileHarnessKeys(settings, caps);
+
+  const next = JSON.stringify(settings, null, 2) + '\n';
+  if (next === raw) return; // no churn on the every-spawn path
+  writeAtomic(settingsFile, next);
+  initialized.push('settings.json (updated)');
+}
+
+/** Ensure the PreCompact archiving hook is present, preserving existing hooks. */
+function ensurePreCompactHook(settings: SettingsObject): void {
+  const hooks = asObject(settings.hooks) ?? (settings.hooks = {});
+  const existing = Array.isArray(hooks.PreCompact) ? (hooks.PreCompact as unknown[]) : (hooks.PreCompact = []);
+  if (JSON.stringify(existing).includes(PRE_COMPACT_COMMAND)) return;
+  existing.push({ hooks: [{ type: 'command', command: PRE_COMPACT_COMMAND }] });
+}
+
+/**
+ * Reconcile the managed harness-capability keys to `caps`, iterating the
+ * registry's host mechanisms — adding AND removing each key so pre-existing
+ * groups converge (including removal of the legacy always-on teams key).
+ * Everything unmanaged in the file is preserved. `caps` undefined (non-spawn
+ * callers) leaves capability keys untouched.
+ */
+function reconcileHarnessKeys(
+  settings: SettingsObject,
+  caps: Record<string, HarnessCapabilityState> | undefined,
+): void {
+  if (!caps) return;
+  for (const [key, def] of Object.entries(HARNESS_CAPABILITIES)) {
+    const state = caps[key] ?? def.default;
+    const m = def.host;
+    if (m.kind === 'env') {
+      // Presence of the env key IS the on-state.
+      if (state === 'on') {
+        const env = asObject(settings.env) ?? (settings.env = {});
+        env[m.key] = '1';
+      } else {
+        const env = asObject(settings.env);
+        if (env && m.key in env) delete env[m.key];
+      }
+    } else {
+      // disableFlag: the flag is set true when the capability is OFF.
+      if (state === 'off') settings[m.key] = true;
+      else if (m.key in settings) delete settings[m.key];
+    }
   }
 }

@@ -86,16 +86,17 @@ export async function dispatch(
         return err(req.id, 'forbidden', 'CLI access is scoped to this agent group.');
       }
 
-      // Block cli_scope changes from group-scoped agents (privilege escalation)
-      if (req.args.cli_scope !== undefined || req.args['cli-scope'] !== undefined) {
-        return err(req.id, 'forbidden', 'Cannot change cli_scope from a group-scoped agent.');
-      }
-
-      // Same escalation shape for harness capabilities: an agent must not be
-      // able to re-enable harness features (agent teams, Workflow) that the
-      // operator turned off for its group.
-      if (req.args.harness_capabilities !== undefined || req.args['harness-capabilities'] !== undefined) {
-        return err(req.id, 'forbidden', 'Cannot change harness_capabilities from a group-scoped agent.');
+      // Operator-only config fields — block changes from group-scoped agents
+      // (privilege escalation: cli_scope widens CLI access, harness
+      // capabilities re-enable harness features the operator turned off). This
+      // gate runs on RAW args before normalizeArgs, so we normalize each
+      // incoming key to canonical snake_case and compare — one spelling per
+      // protected field, no spelling-variant bypass. Add future fields HERE.
+      const OPERATOR_ONLY_ARGS = new Set(['cli_scope', 'harness_capabilities']);
+      for (const key of Object.keys(req.args)) {
+        if (OPERATOR_ONLY_ARGS.has(key.replace(/-/g, '_'))) {
+          return err(req.id, 'forbidden', `Cannot change ${key.replace(/-/g, '_')} from a group-scoped agent.`);
+        }
       }
 
       // Auto-fill agent-group-related args so the agent doesn't need
