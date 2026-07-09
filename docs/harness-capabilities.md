@@ -32,7 +32,7 @@ ncl groups restart --id <group-id>                                       # apply
 
 ## Upgrade behavior — non-breaking (grandfathered)
 
-Before this feature every group ran with agent teams on and Workflow available. Migration 019 **grandfathers every existing group** to that prior state — it stamps `{"agent-teams":"on","workflow":"on"}` onto each row that exists at upgrade time — so **upgrading changes nothing for your current agents**. Only newly-created groups (and every group on a fresh install) get the lean defaults via the column default `{}`.
+Before this feature every group ran with agent teams on and Workflow available. Migration 019 **grandfathers every existing group** to that prior state — it stamps `{"agent-teams":"on","workflow":"on"}` onto each row that exists at upgrade time, and the startup backfill stamps the same state onto legacy groups whose config row is only created at boot — so **upgrading changes nothing for your current agents**. Only newly-created groups (and every group on a fresh install) get the lean defaults via the column default `{}`. The runner applies the same rule to a `container.json` missing the capability field (written by a pre-upgrade host mid-update): legacy all-on, so nothing flips off before the host restarts.
 
 - **Verify after upgrade**: `ncl groups config get --id <g>` shows `agent-teams`/`workflow` as `on (override)` for pre-existing groups; their `settings.json` keeps the teams env key and has no `disableWorkflows`.
 - **Opt an existing group into the lean defaults** (to get the ~20%/turn saving): `ncl groups config update --id <g> --harness-capabilities 'agent-teams=off,workflow=off'` then `ncl groups restart --id <g>`.

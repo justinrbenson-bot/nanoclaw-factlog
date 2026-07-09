@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { backfillContainerConfigs } from '../../backfill-container-configs.js';
 import { createAgentGroup } from '../agent-groups.js';
 import { closeDb, getDb, initTestDb } from '../connection.js';
 import { getContainerConfig } from '../container-configs.js';
@@ -50,6 +51,27 @@ describe('migration 019 (harness-capabilities) upgrade safety', () => {
     group('ag-new');
     db.prepare('INSERT INTO container_configs (agent_group_id, updated_at) VALUES (?, ?)').run('ag-new', now());
     expect(JSON.parse(getContainerConfig('ag-new')!.harness_capabilities)).toEqual({});
+  });
+
+  it('grandfathers a legacy group whose config row is created by the post-migration backfill', () => {
+    const db = getDb();
+    // Startup sequence on a pre-container-configs-era install: the group
+    // exists but has NO container_configs row when migrations run, so 019's
+    // grandfather UPDATE has nothing to touch. The row is created moments
+    // later by backfillContainerConfigs() (index.ts boot order: migrations →
+    // backfill) — that path must apply the same grandfather rule.
+    group('ag-backfill');
+
+    runMigrations(
+      db,
+      migrations.filter((m) => m.name === 'harness-capabilities'),
+    );
+    backfillContainerConfigs();
+
+    expect(JSON.parse(getContainerConfig('ag-backfill')!.harness_capabilities)).toEqual({
+      'agent-teams': 'on',
+      workflow: 'on',
+    });
   });
 
   it('is a no-op on a fresh install (no existing rows) — new groups start lean', () => {
