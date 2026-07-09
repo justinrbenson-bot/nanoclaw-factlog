@@ -8,7 +8,7 @@ NanoClaw disables harness-native features that overlap its own systems, and expo
 |---|---|---|---|
 | Agent teams (experimental multi-agent coordination inside one session) | `agent-teams` | **off** | Settings reconciler adds/removes `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` in the group's `settings.json` on every spawn. On the pinned CLI, settings env strictly beats SDK options env, so the settings file is the only working switch. |
 | Workflow tool (in-session multi-agent orchestration scripts) | `workflow` | **off** | Reconciler sets `disableWorkflows: true` (removes the tool and its agent-types catalog — ~26KB/turn); the runner also adds `Workflow` to `disallowedTools` + PreToolUse hook as a backstop. |
-| Cron/scheduling (`CronCreate/CronDelete/CronList`, `ScheduleWakeup`) | — | fixed off | `disallowedTools` + hook. NanoClaw's `schedule_task` MCP suite is the authoritative scheduler. |
+| Cron/scheduling (`CronCreate/CronDelete/CronList`, `ScheduleWakeup`) | — | fixed off | `disallowedTools` + hook. NanoClaw's `ncl tasks` is the authoritative scheduler. |
 | `AskUserQuestion` | — | fixed off | `disallowedTools` (returns a placeholder headless; `ask_user_question` is the real mechanism). |
 | Plan/worktree modes | — | fixed off | `disallowedTools` (broken headless). |
 | `DesignSync` | — | fixed off | `disallowedTools` (desktop design-tool integration; nothing to sync with in a container; ~9.3KB/turn schema). |
@@ -28,22 +28,17 @@ ncl groups restart --id <group-id>                                       # apply
 ### Enforcement strength (be precise about the boundary)
 
 - **`workflow` off** has two independent locks: the reconciled `disableWorkflows` settings key *and* a runner-side `disallowedTools` block. The tool cannot come back inside a running container even if the settings file is edited.
-- **`agent-teams` off** has only one mechanism: the absence of the env key from the group's `settings.json`. That file is mounted **read-write** into the container (the CLI needs to write transcripts there), and `settingSources` also loads project/local settings from the agent-writable workspace. So an agent that actively rewrites its own settings can re-enable teams **for the current container lifetime**, until the next spawn re-reconciles it. Treat `agent-teams=off` as **configuration hygiene enforced at spawn**, not a hard adversarial boundary inside a live container — the real trust boundary remains the container sandbox + OneCLI. A follow-up ([nanocoai/nanoclaw#TBD](https://github.com/nanocoai/nanoclaw/issues)) will mount the managed settings source read-only to close this.
+- **`agent-teams` off** has only one mechanism: the absence of the env key from the group's `settings.json`. That file is mounted **read-write** into the container (the CLI needs to write transcripts there), and `settingSources` also loads project/local settings from the agent-writable workspace. So an agent that actively rewrites its own settings can re-enable teams **for the current container lifetime**, until the next spawn re-reconciles it. Treat `agent-teams=off` as **configuration hygiene enforced at spawn**, not a hard adversarial boundary inside a live container — the real trust boundary remains the container sandbox + OneCLI. A planned follow-up will mount the managed settings source read-only to close this.
 
-## [BREAKING] Agent teams default off
+## Upgrade behavior — non-breaking (grandfathered)
 
-- **Detect**: after updating, agents in a group that used Claude's experimental agent-teams feature lose team coordination (the expanded `Agent`/`SendMessage`/`TaskCreate`/`TaskList` schemas revert to baseline) at the group's next container spawn. `ncl groups config get` shows `agent-teams: off (default)`; the group's `.claude-shared/settings.json` no longer contains `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`.
-- **Why**: it overlaps NanoClaw's agent-to-agent system (`create_agent` + destinations routing), is experimental upstream, multiplies separately-billed agent contexts invisibly to NanoClaw ops, and its `SendMessage` invites confusion with `mcp__nanoclaw__send_message`.
-- **Fix**: `ncl groups config update --id <g> --harness-capabilities 'agent-teams=on'` then `ncl groups restart --id <g>`.
-- **Verify**: `ncl groups config get --id <g>` shows `agent-teams: on (override)`; the settings.json env key is back after the next spawn.
-- **Rollback**: the fix line above IS the rollback — per group, no code changes.
+Before this feature every group ran with agent teams on and Workflow available. Migration 019 **grandfathers every existing group** to that prior state — it stamps `{"agent-teams":"on","workflow":"on"}` onto each row that exists at upgrade time — so **upgrading changes nothing for your current agents**. Only newly-created groups (and every group on a fresh install) get the lean defaults via the column default `{}`.
 
-## [BREAKING] Workflow tool default off
+- **Verify after upgrade**: `ncl groups config get --id <g>` shows `agent-teams`/`workflow` as `on (override)` for pre-existing groups; their `settings.json` keeps the teams env key and has no `disableWorkflows`.
+- **Opt an existing group into the lean defaults** (to get the ~20%/turn saving): `ncl groups config update --id <g> --harness-capabilities 'agent-teams=off,workflow=off'` then `ncl groups restart --id <g>`.
+- **Re-enable on a new group**: `ncl groups config update --id <g> --harness-capabilities 'agent-teams=on,workflow=on'` then restart. The `ncl` command is the rollback — per group, no code changes.
 
-- **Detect**: agents no longer have the `Workflow` tool; request payloads shrink ~26KB/turn. `ncl groups config get` shows `workflow: off (default)`.
-- **Why**: it is redundant with NanoClaw's orchestration model (sessions + a2a, host stays in control), can spawn dozens of agents invisible to NanoClaw ops, and is the single largest tool schema on every turn (21.3KB measured on CLI 2.1.197).
-- **Fix**: `ncl groups config update --id <g> --harness-capabilities 'workflow=on'` then `ncl groups restart --id <g>`.
-- **Verify / Rollback**: as above, with `workflow`.
+Why the defaults are off for new groups: agent teams overlaps NanoClaw's a2a (`create_agent` + destinations), is experimental upstream, and multiplies separately-billed agents invisibly to ops; Workflow is redundant with NanoClaw's orchestration and is the single largest tool schema on every turn.
 
 ## Notes for forks
 
