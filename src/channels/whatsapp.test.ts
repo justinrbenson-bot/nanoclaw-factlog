@@ -1,26 +1,26 @@
 /**
  * Regression coverage for #2560 — group @-mentions of the bot must set
- * `InboundMessage.isMention`. Before the fix, the inbound construction
- * site hard-coded `isMention: !isGroup ? true : undefined`, which dropped
- * every group mention on the floor and prevented the router from waking
- * the agent on a mention-only trigger.
+ * `InboundMessage.isMention` — plus the shared-number mode split: when
+ * ASSISTANT_HAS_OWN_NUMBER is not explicitly 'true' the adapter runs on the
+ * operator's personal number, so NOTHING is a bot mention (DMs address the
+ * human; group tags of the owner tag the human) and the bot-LID → assistant
+ * name content rewrite is skipped.
  *
  * The detection logic lives in the exported pure helper `isBotMentionedInGroup`;
- * the inbound site calls it with `normalized`, `botPhoneJid`, `botLidUser`.
- * `isMention` is then computed as:
- *
- *   isMention: !isGroup ? true : botMentionedInGroup ? true : undefined
- *
- * Both the helper and the call-site ternary are covered below so a future
- * refactor that breaks either part fails this suite.
+ * the inbound site feeds it into `computeIsMention(shared, isGroup, mentioned)`.
+ * Both helpers and the mode-resolution truth table are covered below so a
+ * future refactor that breaks any part fails this suite.
  */
 import { describe, it, expect } from 'vitest';
 
 import {
   appendMediaFailureNote,
   computeIsMention,
+  computeWhatsappDefaults,
   isBotMentionedInGroup,
   parseWhatsAppMentions,
+  resolveSharedMode,
+  rewriteBotLidMention,
 } from './whatsapp.js';
 
 const BOT_PHONE_JID = '15550009999@s.whatsapp.net';
@@ -89,19 +89,91 @@ describe('isBotMentionedInGroup (#2560)', () => {
   });
 });
 
-describe('InboundMessage.isMention semantics (#2560)', () => {
-  it('is undefined for a group message with no bot mention', () => {
-    expect(computeIsMention(true, false)).toBeUndefined();
+describe('InboundMessage.isMention semantics (#2560 + shared mode)', () => {
+  describe('dedicated mode (bot has its own number)', () => {
+    it('is undefined for a group message with no bot mention', () => {
+      expect(computeIsMention(false, true, false)).toBeUndefined();
+    });
+
+    it('is true for a group message where the bot is mentioned', () => {
+      expect(computeIsMention(false, true, true)).toBe(true);
+    });
+
+    it('is true for a DM regardless of mention state', () => {
+      // DMs are unconditionally mentions — the helper isn't consulted there.
+      expect(computeIsMention(false, false, false)).toBe(true);
+      expect(computeIsMention(false, false, true)).toBe(true);
+    });
   });
 
-  it('is true for a group message where the bot is mentioned', () => {
-    expect(computeIsMention(true, true)).toBe(true);
+  describe('shared mode (operator personal number)', () => {
+    it('is undefined for EVERYTHING — DMs address the human, tags tag the human', () => {
+      expect(computeIsMention(true, false, false)).toBeUndefined();
+      expect(computeIsMention(true, false, true)).toBeUndefined();
+      expect(computeIsMention(true, true, false)).toBeUndefined();
+      expect(computeIsMention(true, true, true)).toBeUndefined();
+    });
+  });
+});
+
+describe('resolveSharedMode env truth table', () => {
+  it('explicit "true" → dedicated (not shared)', () => {
+    expect(resolveSharedMode('true')).toBe(false);
   });
 
-  it('is true for a DM regardless of mention state', () => {
-    // DMs are unconditionally mentions — the helper isn't consulted there.
-    expect(computeIsMention(false, false)).toBe(true);
-    expect(computeIsMention(false, true)).toBe(true);
+  it('absent or any other value → shared', () => {
+    expect(resolveSharedMode(undefined)).toBe(true);
+    expect(resolveSharedMode('')).toBe(true);
+    expect(resolveSharedMode('false')).toBe(true);
+    expect(resolveSharedMode('TRUE')).toBe(true);
+    expect(resolveSharedMode('1')).toBe(true);
+    expect(resolveSharedMode('yes')).toBe(true);
+  });
+});
+
+describe('rewriteBotLidMention', () => {
+  const ASSISTANT = 'Andy';
+
+  it('dedicated mode rewrites a bot-LID tag into @<assistant name>', () => {
+    expect(rewriteBotLidMention(`hey @${BOT_LID_USER} status?`, false, BOT_LID_USER, ASSISTANT)).toBe(
+      'hey @Andy status?',
+    );
+  });
+
+  it('shared mode skips the rewrite — a tag of the owner must not become name-pattern bait', () => {
+    const content = `hey @${BOT_LID_USER} status?`;
+    expect(rewriteBotLidMention(content, true, BOT_LID_USER, ASSISTANT)).toBe(content);
+  });
+
+  it('passes content through when the bot LID is unknown', () => {
+    expect(rewriteBotLidMention(`hey @${BOT_LID_USER}`, false, undefined, ASSISTANT)).toBe(`hey @${BOT_LID_USER}`);
+  });
+
+  it('passes content through when there is no tag of the bot LID', () => {
+    expect(rewriteBotLidMention('no tags here', false, BOT_LID_USER, ASSISTANT)).toBe('no tags here');
+  });
+});
+
+describe('computeWhatsappDefaults', () => {
+  it('shared mode declares strict name-pattern defaults with no platform mentions', () => {
+    expect(computeWhatsappDefaults(true)).toEqual({
+      dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'strict' },
+      group: {
+        engageMode: 'pattern',
+        engagePattern: '\\b{name}\\b',
+        threads: false,
+        unknownSenderPolicy: 'strict',
+      },
+      mentions: 'never',
+    });
+  });
+
+  it('dedicated mode declares platform mentions with group engage on mention (never sticky)', () => {
+    expect(computeWhatsappDefaults(false)).toEqual({
+      dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
+      group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'request_approval' },
+      mentions: 'platform',
+    });
   });
 });
 
@@ -172,9 +244,7 @@ describe('appendMediaFailureNote', () => {
   });
 
   it('appends the note on its own line when a captioned message has a failed download', () => {
-    expect(appendMediaFailureNote('check this out', ['image'])).toBe(
-      'check this out\n[image could not be downloaded]',
-    );
+    expect(appendMediaFailureNote('check this out', ['image'])).toBe('check this out\n[image could not be downloaded]');
   });
 
   it('uses the note as the content when an uncaptioned media message fails (would otherwise be dropped)', () => {
