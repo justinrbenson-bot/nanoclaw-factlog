@@ -5,8 +5,21 @@
 import { createDiscordAdapter } from '@chat-adapter/discord';
 
 import { readEnvFile } from '../env.js';
+import type { ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
+
+/**
+ * Dedicated bot app on a threaded platform. group threads:true matches the
+ * declared supportsThreads (the skill-installed install-style knob) so
+ * mention-sticky engagement stays bounded per-thread. dm.threads:false —
+ * DM replies land top-level, one session per DM.
+ */
+const DISCORD_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
+  group: { engageMode: 'mention-sticky', threads: true, unknownSenderPolicy: 'request_approval' },
+  mentions: 'platform',
+};
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
@@ -75,6 +88,11 @@ registerChannelAdapter('discord', {
       botToken: env.DISCORD_BOT_TOKEN,
       extractReplyContext,
       supportsThreads: true,
+      defaults: DISCORD_DEFAULTS,
+      // Discord rejects messages over 2000 chars; without this the bridge
+      // would let long agent replies fail instead of splitting them.
+      maxTextLength: 2000,
     });
   },
+  defaults: DISCORD_DEFAULTS,
 });

@@ -23,7 +23,7 @@ import { readEnvFile } from '../env.js';
 import { DATA_DIR } from '../config.js';
 import { log } from '../log.js';
 import { registerChannelAdapter } from './channel-registry.js';
-import type { ChannelAdapter, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 
 const DATA_SUBDIR = path.join(DATA_DIR, 'wechat');
 const AUTH_FILE = path.join(DATA_SUBDIR, 'auth.json');
@@ -74,6 +74,21 @@ function messageText(msg: OutboundMessage): string {
   const c = msg.content as Record<string, unknown>;
   return (c.text as string) || (c.markdown as string) || JSON.stringify(msg.content);
 }
+
+/**
+ * Shared personal account (iLink bot rides the operator's own WeChat), so
+ * auto-create is 'strict' and groups engage on the agent's name. The adapter
+ * does not yet emit top-level isGroup/isMention on InboundMessage (they only
+ * exist inside content today), so the honest declaration is 'never'.
+ * TODO(PR9): once the adapter hoists isGroup to top level and sets
+ * isMention=true for DMs, flip mentions to 'dm-only' (group stays
+ * name-pattern — WeChat group tags address the human on a shared account).
+ */
+const WECHAT_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'strict' },
+  group: { engageMode: 'pattern', engagePattern: '\\b{name}\\b', threads: false, unknownSenderPolicy: 'strict' },
+  mentions: 'never',
+};
 
 registerChannelAdapter('wechat', {
   factory: () => {
@@ -157,6 +172,7 @@ registerChannelAdapter('wechat', {
       name: 'wechat',
       channelType: 'wechat',
       supportsThreads: false,
+      defaults: WECHAT_DEFAULTS,
 
       async setup(config: ChannelSetup) {
         setupConfig = config;
@@ -218,4 +234,5 @@ registerChannelAdapter('wechat', {
 
     return adapter;
   },
+  defaults: WECHAT_DEFAULTS,
 });

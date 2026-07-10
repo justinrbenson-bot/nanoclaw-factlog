@@ -155,8 +155,16 @@ export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => 
           throw err;
         }
       }
-      activeAdapters.set(adapter.channelType, adapter);
-      log.info('Channel adapter started', { channel: name, type: adapter.channelType });
+      // Adapters key by instance (default instance = channelType), so N
+      // instances of one platform coexist. Duplicate keys warn instead of
+      // throwing — boot stays resilient, matching the historical silent
+      // last-write-wins, but now visibly.
+      const key = adapter.instance ?? adapter.channelType;
+      if (activeAdapters.has(key)) {
+        log.warn('Duplicate adapter instance key — overwriting previous adapter', { key, channel: name });
+      }
+      activeAdapters.set(key, adapter);
+      log.info('Channel adapter started', { channel: name, type: adapter.channelType, instance: key });
     } catch (err) {
       log.error('Failed to start channel adapter', { channel: name, err });
     }

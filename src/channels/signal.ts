@@ -13,7 +13,7 @@ import { createConnection, type Socket } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { ChannelAdapter, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
@@ -809,6 +809,7 @@ export function createSignalAdapter(config: {
     name: 'signal',
     channelType: 'signal',
     supportsThreads: false,
+    defaults: SIGNAL_DEFAULTS,
 
     async setup(cfg: ChannelSetup): Promise<void> {
       setup = cfg;
@@ -934,6 +935,22 @@ export function createSignalAdapter(config: {
 const DEFAULT_TCP_HOST = '127.0.0.1';
 const DEFAULT_TCP_PORT = 7583;
 
+/**
+ * Linked personal account, so auto-create is 'strict'. signal-cli DOES carry
+ * group-mention metadata (envelope.dataMessage.mentions), but this adapter
+ * does not yet emit top-level isGroup/isMention on InboundMessage — until it
+ * does, mention wirings could never fire, so the honest declaration is
+ * 'never' with a name-pattern group default.
+ * TODO(PR9): once the adapter emits isMention (DM→true, group→
+ * dataMessage.mentions matched against config.account) and top-level isGroup,
+ * flip this to group { engageMode: 'mention' } + mentions: 'platform'.
+ */
+const SIGNAL_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'strict' },
+  group: { engageMode: 'pattern', engagePattern: '\\b{name}\\b', threads: false, unknownSenderPolicy: 'strict' },
+  mentions: 'never',
+};
+
 registerChannelAdapter('signal', {
   factory: () => {
     const envVars = readEnvFile([
@@ -980,4 +997,5 @@ registerChannelAdapter('signal', {
       signalDataDir,
     });
   },
+  defaults: SIGNAL_DEFAULTS,
 });

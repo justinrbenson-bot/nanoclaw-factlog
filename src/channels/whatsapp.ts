@@ -44,7 +44,14 @@ import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
-import type { ChannelAdapter, ChannelSetup, ConversationInfo, InboundMessage, OutboundMessage } from './adapter.js';
+import type {
+  ChannelAdapter,
+  ChannelDefaults,
+  ChannelSetup,
+  ConversationInfo,
+  InboundMessage,
+  OutboundMessage,
+} from './adapter.js';
 
 const baileysLogger = pino({ level: 'silent' });
 
@@ -277,6 +284,30 @@ function buildMediaMessage(data: Buffer, filename: string, ext: string, caption?
   // Default: send as document
   return { document: data, fileName: filename, caption, mimetype: 'application/octet-stream' };
 }
+
+/**
+ * Shared vs dedicated number changes every default, so the declaration is
+ * computed once at module load from the adapter's own env:
+ *  - shared (ASSISTANT_HAS_OWN_NUMBER unset/false): the operator's personal
+ *    number. DMs and group tags address the human, not the bot ('never');
+ *    groups engage on the agent's name ({name} pattern); auto-create stays
+ *    'strict' so strangers DMing the human can never spawn agent state.
+ *  - dedicated: a real bot number. Groups engage on platform mentions —
+ *    'mention', NEVER 'mention-sticky': WhatsApp is non-threaded and sessions
+ *    are never deleted, so sticky would mean engaged-forever.
+ */
+const WHATSAPP_SHARED = readEnvFile(['ASSISTANT_HAS_OWN_NUMBER']).ASSISTANT_HAS_OWN_NUMBER !== 'true';
+const WHATSAPP_DEFAULTS: ChannelDefaults = WHATSAPP_SHARED
+  ? {
+      dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'strict' },
+      group: { engageMode: 'pattern', engagePattern: '\\b{name}\\b', threads: false, unknownSenderPolicy: 'strict' },
+      mentions: 'never',
+    }
+  : {
+      dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
+      group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'request_approval' },
+      mentions: 'platform',
+    };
 
 registerChannelAdapter('whatsapp', {
   factory: () => {
@@ -822,6 +853,7 @@ registerChannelAdapter('whatsapp', {
       name: 'whatsapp',
       channelType: 'whatsapp',
       supportsThreads: false,
+      defaults: WHATSAPP_DEFAULTS,
 
       async setup(hostConfig: ChannelSetup) {
         setupConfig = hostConfig;
@@ -960,4 +992,5 @@ registerChannelAdapter('whatsapp', {
 
     return adapter;
   },
+  defaults: WHATSAPP_DEFAULTS,
 });
