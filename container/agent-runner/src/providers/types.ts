@@ -79,6 +79,11 @@ export interface ProviderOptions {
    * through to the underlying SDK. If omitted, the SDK default is used.
    */
   effort?: string;
+  /**
+   * Extra lifecycle hooks merged into the provider's own (currently the
+   * factlog brief/gate hooks). Providers without hook support ignore them.
+   */
+  extraHooks?: ProviderHooks;
 }
 
 export interface QueryInput {
@@ -103,10 +108,28 @@ export interface QueryInput {
   };
 }
 
-export interface McpServerConfig {
-  command: string;
-  args: string[];
-  env: Record<string, string>;
+export type McpServerConfig =
+  /** Spawned stdio server (container.json shape). */
+  | { command: string; args: string[]; env: Record<string, string> }
+  /** Streamable-HTTP server (e.g. the factlog daemon via its loopback proxy). */
+  | { type: 'http'; url: string; headers?: Record<string, string> };
+
+/**
+ * Lifecycle hook callback, structurally compatible with the Claude Agent
+ * SDK's HookCallback but declared SDK-free so non-SDK providers can ignore
+ * hooks without importing Claude types. Providers that support hooks cast at
+ * the SDK boundary.
+ */
+export type ProviderHook = (
+  input: unknown,
+  toolUseID: string | undefined,
+  options: { signal: AbortSignal },
+) => Promise<Record<string, unknown>>;
+
+export interface ProviderHooks {
+  SessionStart?: ProviderHook[];
+  PreToolUse?: ProviderHook[];
+  Stop?: ProviderHook[];
 }
 
 export interface AgentQuery {

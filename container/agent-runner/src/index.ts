@@ -27,11 +27,15 @@ import { fileURLToPath } from 'url';
 
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
+import { loadFactlogRunConfig } from './factlog/config.js';
+import { createFactlogHooks } from './factlog/hooks.js';
+import { startFactlogProxy } from './factlog/proxy.js';
 import { ensureMemoryScaffold } from './memory-scaffold.js';
 // Providers barrel — each enabled provider self-registers on import.
 // Provider skills append imports to providers/index.ts.
 import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
+import type { McpServerConfig, ProviderHooks } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
 
 function log(msg: string): void {
@@ -74,7 +78,7 @@ async function main(): Promise<void> {
   const mcpServerPath = path.join(__dirname, 'mcp-tools', 'index.ts');
 
   // Build MCP servers config: nanoclaw built-in + any from container.json
-  const mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {
+  const mcpServers: Record<string, McpServerConfig> = {
     nanoclaw: {
       command: 'bun',
       args: ['run', mcpServerPath],
@@ -87,6 +91,19 @@ async function main(): Promise<void> {
     log(`Additional MCP server: ${name} (${serverConfig.command})`);
   }
 
+  // factlog coordination channel (docs/factlog.md): when the host provided a
+  // run identity at /workspace/factlog.json, expose the daemon's MCP surface
+  // through a loopback proxy (the token never reaches the SDK subprocess) and
+  // wire the jaunt-discipline lifecycle hooks. Absent identity = all no-ops.
+  const factlog = loadFactlogRunConfig();
+  let extraHooks: ProviderHooks | undefined;
+  if (factlog) {
+    const proxy = startFactlogProxy(factlog);
+    mcpServers.factlog = { type: 'http', url: `${proxy.url}/mcp` };
+    extraHooks = createFactlogHooks(factlog);
+    log(`factlog enabled (agent: ${factlog.agent}, transport: ${factlog.transport})`);
+  }
+
   const provider = createProvider(providerName, {
     assistantName: config.assistantName || undefined,
     mcpServers,
@@ -94,6 +111,7 @@ async function main(): Promise<void> {
     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
     model: config.model,
     effort: config.effort,
+    extraHooks,
   });
 
   // Providers that lack native memory opt in via `usesMemoryScaffold`; for them

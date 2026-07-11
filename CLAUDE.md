@@ -72,6 +72,7 @@ For ad-hoc queries from skills or scripts, use the in-tree wrapper rather than t
 | `src/modules/approvals/onecli-approvals.ts` | OneCLI credentialed-action approval bridge |
 | `src/modules/permissions/user-dm.ts` | Cold-DM resolution + `user_dms` cache |
 | `src/group-init.ts` | Per-agent-group filesystem scaffold (CLAUDE.md, skills) — agent-runner source is a shared read-only mount, not copied per group |
+| `src/modules/factlog/index.ts` | factlog coordination channel: per-run actor token mint, run identity file, daemon socket mount (see [docs/factlog.md](docs/factlog.md)) |
 | `src/db/container-configs.ts` | CRUD for `container_configs` table (per-group container runtime config) |
 | `src/backfill-container-configs.ts` | Migrates legacy `container.json` files into the DB on startup |
 | `src/container-restart.ts` | Kill + on-wake respawn for agent group containers |
@@ -282,6 +283,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 | [docs/db-session.md](docs/db-session.md) | Per-session `inbound.db` + `outbound.db` schemas + seq parity |
 | [docs/agent-runner-details.md](docs/agent-runner-details.md) | Agent-runner internals + MCP tool interface |
 | [docs/isolation-model.md](docs/isolation-model.md) | Three-level channel isolation model |
+| [docs/factlog.md](docs/factlog.md) | factlog integration: cross-container coordination via a host-side fact log (briefs, invariant gates, run-locks, taint/approval trust model) |
 | [docs/setup-wiring.md](docs/setup-wiring.md) | What's wired, what's open in the setup flow |
 | [docs/architecture-diagram.md](docs/architecture-diagram.md) | Diagram version of the architecture |
 | [docs/build-and-runtime.md](docs/build-and-runtime.md) | Runtime split (Node host + Bun container), lockfiles, image build surface, CI, key invariants |

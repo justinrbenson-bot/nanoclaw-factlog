@@ -17,6 +17,11 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
+  'FACTLOG_WORKSPACE',
+  'FACTLOG_BIN',
+  'FACTLOG_SOCKET',
+  'FACTLOG_TRANSPORT',
+  'FACTLOG_HOST_URL',
 ]);
 
 /**
@@ -84,3 +89,26 @@ function resolveConfigTimezone(): string {
   return 'UTC';
 }
 export const TIMEZONE = resolveConfigTimezone();
+
+// ── factlog integration (docs/factlog.md) ──
+// Containers coordinate through a host-side factlog daemon: facts in, facts
+// out, nothing else. Disabled unless FACTLOG_WORKSPACE points at an
+// initialized factlog workspace (a directory containing `.factlog/`).
+export const FACTLOG_WORKSPACE = process.env.FACTLOG_WORKSPACE || envConfig.FACTLOG_WORKSPACE || '';
+// The factlog CLI used to mint/revoke per-run actor tokens.
+export const FACTLOG_BIN = process.env.FACTLOG_BIN || envConfig.FACTLOG_BIN || 'factlog';
+// Daemon unix socket, bind-mounted into containers at /run/factlog.sock.
+export const FACTLOG_SOCKET =
+  process.env.FACTLOG_SOCKET ||
+  envConfig.FACTLOG_SOCKET ||
+  (FACTLOG_WORKSPACE ? path.join(FACTLOG_WORKSPACE, '.factlog', 'factlog.sock') : '');
+// How containers reach the daemon. `socket` bind-mounts FACTLOG_SOCKET (the
+// design default — no container networking). Docker Desktop on macOS cannot
+// forward host unix sockets into the VM, so darwin defaults to
+// `host-gateway`: containers call FACTLOG_HOST_URL via host.docker.internal.
+export const FACTLOG_TRANSPORT =
+  process.env.FACTLOG_TRANSPORT ||
+  envConfig.FACTLOG_TRANSPORT ||
+  (os.platform() === 'darwin' ? 'host-gateway' : 'socket');
+export const FACTLOG_HOST_URL =
+  process.env.FACTLOG_HOST_URL || envConfig.FACTLOG_HOST_URL || 'http://host.docker.internal:4711';

@@ -31,6 +31,7 @@ import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
+import { prepareFactlogRun, releaseFactlogRun } from './modules/factlog/index.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -145,6 +146,13 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
+
+  // factlog coordination channel: mint a per-run actor token, write the run
+  // identity into the session dir (/workspace/factlog.json in-container), and
+  // mount the daemon socket. Null when disabled or preparation failed — the
+  // container then runs exactly as before.
+  const factlogRun = await prepareFactlogRun(agentGroup, containerName, sessionDir(agentGroup.id, session.id));
+  if (factlogRun) mounts.push(...factlogRun.mounts);
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
   const agentIdentifier = agentGroup.id;
@@ -196,6 +204,7 @@ async function spawnContainer(session: Session): Promise<void> {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    releaseFactlogRun(containerName);
     // code null = killed by signal (normal shutdown path), not a boot failure.
     if (code !== 0 && code !== null && stderrTail.length > 0) {
       log.warn('Container exited non-zero', { sessionId: session.id, code, containerName, stderrTail });
@@ -208,6 +217,7 @@ async function spawnContainer(session: Session): Promise<void> {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    releaseFactlogRun(containerName);
     log.error('Container spawn error', { sessionId: session.id, err });
   });
 }

@@ -7,7 +7,15 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type {
+  AgentProvider,
+  AgentQuery,
+  McpServerConfig,
+  ProviderEvent,
+  ProviderHooks,
+  ProviderOptions,
+  QueryInput,
+} from './types.js';
 
 function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
@@ -340,6 +348,7 @@ export class ClaudeProvider implements AgentProvider {
   private additionalDirectories?: string[];
   private model?: string;
   private effort?: string;
+  private extraHooks: ProviderHooks;
 
   constructor(options: ProviderOptions = {}) {
     this.assistantName = options.assistantName;
@@ -347,6 +356,7 @@ export class ClaudeProvider implements AgentProvider {
     this.additionalDirectories = options.additionalDirectories;
     this.model = options.model;
     this.effort = options.effort;
+    this.extraHooks = options.extraHooks ?? {};
     this.env = {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
@@ -421,10 +431,18 @@ export class ClaudeProvider implements AgentProvider {
         settingSources: ['project', 'user', 'local'],
         mcpServers: this.mcpServers,
         hooks: {
-          PreToolUse: [{ hooks: [preToolUseHook] }],
+          // ProviderHooks is a structural, SDK-free mirror of HookCallback
+          // (providers/types.ts) — cast at this SDK boundary only.
+          PreToolUse: [{ hooks: [preToolUseHook, ...((this.extraHooks.PreToolUse ?? []) as unknown as HookCallback[])] }],
           PostToolUse: [{ hooks: [postToolUseHook] }],
           PostToolUseFailure: [{ hooks: [postToolUseHook] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
+          ...(this.extraHooks.SessionStart !== undefined
+            ? { SessionStart: [{ hooks: this.extraHooks.SessionStart as unknown as HookCallback[] }] }
+            : {}),
+          ...(this.extraHooks.Stop !== undefined
+            ? { Stop: [{ hooks: this.extraHooks.Stop as unknown as HookCallback[] }] }
+            : {}),
         },
       },
     });
