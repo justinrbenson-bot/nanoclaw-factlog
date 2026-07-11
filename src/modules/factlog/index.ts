@@ -86,7 +86,26 @@ export interface FactlogRunIdentity {
 export interface FactlogRun {
   /** Extra container mounts (the daemon socket, when transport is `socket`). */
   mounts: VolumeMount[];
+  /**
+   * Extra container env. The OneCLI gateway wires the container's HTTP(S)
+   * proxy to itself (`NODE_USE_ENV_PROXY=1` + `http_proxy`) with no loopback
+   * bypass, which otherwise routes the SDK's connection to the in-container
+   * factlog loopback proxy — and that proxy's own upstream to the daemon —
+   * *through* the gateway, so the HTTP MCP server silently never connects.
+   * NO_PROXY exempts loopback (and the docker host, for `host-gateway`
+   * transport). External API hosts stay proxied, so credential injection is
+   * unaffected.
+   */
+  env: Record<string, string>;
 }
+
+/**
+ * Hosts the factlog loopback proxy (127.0.0.1) and, on `host-gateway`
+ * transport, the daemon itself (host.docker.internal). These must bypass the
+ * OneCLI HTTP proxy or the factlog MCP connection dies. Harmless on `socket`
+ * transport (the daemon is a unix socket, never proxied).
+ */
+const NO_PROXY_BYPASS = '127.0.0.1,localhost,host.docker.internal';
 
 /** token secrets by container name, for best-effort revocation on exit. */
 const runTokens = new Map<string, string>();
@@ -150,7 +169,7 @@ export async function prepareFactlogRun(
       transport: FACTLOG_TRANSPORT,
       origin: groupConfig.origin ?? 'external',
     });
-    return { mounts };
+    return { mounts, env: { NO_PROXY: NO_PROXY_BYPASS, no_proxy: NO_PROXY_BYPASS } };
   } catch (err) {
     runTokens.delete(containerName);
     log.warn('factlog run preparation failed — container spawns without factlog', { containerName, err });

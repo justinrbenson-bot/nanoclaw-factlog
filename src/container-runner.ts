@@ -164,6 +164,7 @@ async function spawnContainer(session: Session): Promise<void> {
     provider,
     contribution,
     agentIdentifier,
+    factlogRun?.env,
   );
 
   log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
@@ -438,6 +439,7 @@ async function buildContainerArgs(
   _provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
+  factlogEnv?: Record<string, string>,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
@@ -502,6 +504,15 @@ async function buildContainerArgs(
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
   log.info('OneCLI gateway applied', { containerName });
+
+  // factlog env (NO_PROXY loopback bypass) — applied AFTER the OneCLI gateway
+  // so it wins over any proxy env the gateway set. Without this the factlog
+  // HTTP MCP connection is routed through the gateway and silently fails.
+  if (factlogEnv) {
+    for (const [key, value] of Object.entries(factlogEnv)) {
+      args.push('-e', `${key}=${value}`);
+    }
+  }
 
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
   args.push('--entrypoint', 'bash');
