@@ -228,6 +228,19 @@ describe('lifecycle hooks', () => {
     expect(ctx).toContain('token bucket'); // block brief (catalog)
   });
 
+  it('SessionStart skips the (global) scope brief when homeBlocks is set but homeScopes is not', async () => {
+    // No homeScopes + has homeBlocks: fetching the scope brief would pull the
+    // daemon's global firehose. The hook must not call the daemon at all.
+    const blockOnly = { ...blockCfg, homeScopes: undefined };
+    const out = (await createFactlogHooks(blockOnly, deps).SessionStart![0]({}, undefined, { signal })) as {
+      hookSpecificOutput?: { additionalContext: string };
+    };
+    expect(seen.length).toBe(0); // daemon /brief never hit
+    expect(catalogSeen.length).toBe(1); // catalog was
+    expect(out.hookSpecificOutput?.additionalContext).toContain('token bucket');
+    expect(out.hookSpecificOutput?.additionalContext).not.toContain('quiet hours');
+  });
+
   it('SessionStart still injects the block brief when the scope brief is empty', async () => {
     // blockCfg with no home scopes: daemon still returns briefText here, so
     // point it at the dead daemon URL but keep the live catalog.

@@ -66,7 +66,20 @@ export function createFactlogHooks(cfg: FactlogRunConfig, deps: FactlogHookDeps 
   const sessionStart: ProviderHook = async () => {
     // Scope brief (daemon) and block brief (catalog) are independent surfaces;
     // fetch both, keep whichever returned content. Both fail open to null.
-    const [scopeBrief, blockBrief] = await Promise.all([fetchBrief(cfg), fetchBlockBrief(cfg)]);
+    //
+    // A group that declares homeBlocks but no homeScopes has opted into
+    // block-based context: fetching the scope brief anyway would hand it the
+    // daemon's GLOBAL brief (no scope param = whole log), re-flooding it with
+    // the cross-project noise blocks exist to filter out. So skip the scope
+    // brief in that case. Declaring neither still means the global brief — the
+    // documented "absent config = global" default is preserved.
+    const hasBlocks = (cfg.homeBlocks ?? []).length > 0;
+    const hasScopes = (cfg.homeScopes ?? []).length > 0;
+    const wantScopeBrief = hasScopes || !hasBlocks;
+    const [scopeBrief, blockBrief] = await Promise.all([
+      wantScopeBrief ? fetchBrief(cfg) : Promise.resolve(null),
+      fetchBlockBrief(cfg),
+    ]);
     const sections: string[] = [];
     if (scopeBrief !== null && scopeBrief.trim() !== '') sections.push(scopeBrief.trim());
     if (blockBrief !== null && blockBrief.trim() !== '') {
