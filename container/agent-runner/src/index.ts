@@ -30,6 +30,7 @@ import { buildSystemPromptAddendum } from './destinations.js';
 import { loadFactlogRunConfig } from './factlog/config.js';
 import { createFactlogHooks } from './factlog/hooks.js';
 import { startFactlogProxy } from './factlog/proxy.js';
+import { waitForFactlogMcpReady } from './factlog/readiness.js';
 import { ensureMemoryScaffold } from './memory-scaffold.js';
 // Providers barrel — each enabled provider self-registers on import.
 // Provider skills append imports to providers/index.ts.
@@ -99,9 +100,20 @@ async function main(): Promise<void> {
   let extraHooks: ProviderHooks | undefined;
   if (factlog) {
     const proxy = startFactlogProxy(factlog);
-    mcpServers.factlog = { type: 'http', url: `${proxy.url}/mcp` };
+    const mcpUrl = `${proxy.url}/mcp`;
+    mcpServers.factlog = { type: 'http', url: mcpUrl };
     extraHooks = createFactlogHooks(factlog);
-    log(`factlog enabled (agent: ${factlog.agent}, transport: ${factlog.transport})`);
+    // Readiness gate: warm and confirm the proxy → daemon /mcp path BEFORE the
+    // provider (and its first turn) start, so the SDK's async MCP connect
+    // resolves fast and the http factlog server isn't dropped from turn 1.
+    // Throttling-agnostic — it never depends on the Anthropic API. Fail-open:
+    // a not-ready daemon leaves the run without factlog tools rather than
+    // blocking message delivery.
+    const ready = await waitForFactlogMcpReady(mcpUrl);
+    log(
+      `factlog enabled (agent: ${factlog.agent}, transport: ${factlog.transport}, mcpReady: ${ready})` +
+        (ready ? '' : ' — WARNING: daemon MCP not ready, tools may be unavailable this run'),
+    );
   }
 
   const provider = createProvider(providerName, {
