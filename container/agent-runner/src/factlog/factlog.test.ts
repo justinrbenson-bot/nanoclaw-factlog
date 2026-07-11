@@ -8,7 +8,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { fetchBrief, postHookEvent } from './client.js';
+import { fetchBlockBrief, fetchBrief, postHookEvent } from './client.js';
 import { loadFactlogRunConfig, type FactlogRunConfig } from './config.js';
 import { createFactlogHooks, destinationScope } from './hooks.js';
 import { startFactlogProxy } from './proxy.js';
@@ -45,8 +45,28 @@ const daemon = Bun.serve({
   },
 });
 
+// ── mock catalog (TCP; the catalog is HTTP-only, reached over host-gateway) ──
+const catalogSeen: Seen[] = [];
+let catalogBriefText = '[seq 3] decision planner@claude: use a token bucket';
+const catalog = Bun.serve({
+  port: 0,
+  fetch: async (req) => {
+    const url = new URL(req.url);
+    catalogSeen.push({
+      path: url.pathname + url.search,
+      method: req.method,
+      auth: req.headers.get('authorization'),
+      body: null,
+    });
+    if (url.pathname === '/brief') return new Response(catalogBriefText);
+    return new Response('not found', { status: 404 });
+  },
+});
+const catalogUrl = `http://127.0.0.1:${catalog.port}`;
+
 afterAll(() => {
   daemon.stop(true);
+  catalog.stop(true);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -64,8 +84,12 @@ const deadCfg: FactlogRunConfig = { ...cfg, transport: 'http', url: 'http://127.
 
 const signal = new AbortController().signal;
 
+/** cfg with block homes pointed at the mock catalog. */
+const blockCfg: FactlogRunConfig = { ...cfg, homeBlocks: ['topic:ratelimiter', 'job:impl'], catalogUrl };
+
 beforeEach(() => {
   seen.length = 0;
+  catalogSeen.length = 0;
   hookResponse = {};
 });
 
@@ -110,6 +134,29 @@ describe('client over the unix socket', () => {
   it('fails open (null) when the daemon is unreachable', async () => {
     expect(await fetchBrief(deadCfg)).toBeNull();
     expect(await postHookEvent(deadCfg, 'stop', {})).toBeNull();
+  });
+});
+
+describe('fetchBlockBrief (catalog over TCP)', () => {
+  it('fetches the block brief with each block as a query param', async () => {
+    const brief = await fetchBlockBrief(blockCfg);
+    expect(brief).toBe(catalogBriefText);
+    expect(catalogSeen[0].auth).toBe('Bearer flt_testtoken');
+    expect(catalogSeen[0].path).toContain('budget=500');
+    expect(catalogSeen[0].path).toContain('format=prompt');
+    expect(catalogSeen[0].path).toContain('block=topic%3Aratelimiter');
+    expect(catalogSeen[0].path).toContain('block=job%3Aimpl');
+  });
+
+  it('returns null (no fetch) when no catalog URL or no blocks are set', async () => {
+    expect(await fetchBlockBrief(cfg)).toBeNull(); // no catalogUrl
+    expect(await fetchBlockBrief({ ...blockCfg, homeBlocks: [] })).toBeNull();
+    expect(catalogSeen.length).toBe(0);
+  });
+
+  it('fails open (null) when the catalog is unreachable', async () => {
+    const dead = { ...blockCfg, catalogUrl: 'http://127.0.0.1:9' };
+    expect(await fetchBlockBrief(dead)).toBeNull();
   });
 });
 
@@ -169,6 +216,26 @@ describe('lifecycle hooks', () => {
   it('SessionStart returns {} when the daemon is unreachable', async () => {
     const out = await createFactlogHooks(deadCfg, deps).SessionStart![0]({}, undefined, { signal });
     expect(out).toEqual({});
+  });
+
+  it('SessionStart appends the block brief under an assigned-blocks heading', async () => {
+    const out = (await createFactlogHooks(blockCfg, deps).SessionStart![0]({ source: 'startup' }, undefined, {
+      signal,
+    })) as { hookSpecificOutput?: { additionalContext: string } };
+    const ctx = out.hookSpecificOutput!.additionalContext;
+    expect(ctx).toContain('quiet hours'); // scope brief (daemon)
+    expect(ctx).toContain('### assigned blocks');
+    expect(ctx).toContain('token bucket'); // block brief (catalog)
+  });
+
+  it('SessionStart still injects the block brief when the scope brief is empty', async () => {
+    // blockCfg with no home scopes: daemon still returns briefText here, so
+    // point it at the dead daemon URL but keep the live catalog.
+    const onlyBlocks = { ...blockCfg, transport: 'http' as const, url: 'http://127.0.0.1:9', socket: undefined };
+    const out = (await createFactlogHooks(onlyBlocks, deps).SessionStart![0]({}, undefined, { signal })) as {
+      hookSpecificOutput?: { additionalContext: string };
+    };
+    expect(out.hookSpecificOutput?.additionalContext).toContain('token bucket');
   });
 
   it('PreToolUse ignores non-effectful tools without calling the daemon', async () => {

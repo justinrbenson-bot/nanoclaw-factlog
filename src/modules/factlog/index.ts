@@ -31,6 +31,7 @@ import { promisify } from 'util';
 
 import {
   FACTLOG_BIN,
+  FACTLOG_CATALOG_URL,
   FACTLOG_HOST_URL,
   FACTLOG_SOCKET,
   FACTLOG_TRANSPORT,
@@ -57,6 +58,14 @@ const TOKEN_TTL_SECONDS = 86_400;
 export interface FactlogGroupConfig {
   /** What the agent's brief covers (uris and/or path globs). Absent = global. */
   homeScopes?: string[];
+  /**
+   * Catalog blocks assigned to this agent — its slice of the classified log.
+   * When set, the run also pulls a block-scoped brief from the factlog-catalog
+   * serve endpoint (alongside the scope brief), so an agent can wake on a
+   * curated cross-scope block instead of raw scope globs. Absent = no block
+   * brief. See docs/factlog.md and the factlog-catalog project.
+   */
+  homeBlocks?: string[];
   /** Where the agent may post. Enforced daemon-side via the minted token. */
   writeScopes?: string[];
   /**
@@ -80,6 +89,10 @@ export interface FactlogRunIdentity {
   agent: string;
   session: string;
   homeScopes?: string[];
+  /** Blocks for this run's block-scoped brief (see FactlogGroupConfig). */
+  homeBlocks?: string[];
+  /** factlog-catalog serve base URL — only present when homeBlocks is set. */
+  catalogUrl?: string;
   writeScopes?: string[];
 }
 
@@ -148,6 +161,11 @@ export async function prepareFactlogRun(
       agent: agentGroup.folder,
       session: containerName,
       ...(groupConfig.homeScopes !== undefined ? { homeScopes: groupConfig.homeScopes } : {}),
+      // Block brief only wires when both the group declares homeBlocks and a
+      // catalog URL is configured — otherwise the field is inert plumbing.
+      ...(groupConfig.homeBlocks !== undefined && groupConfig.homeBlocks.length > 0 && FACTLOG_CATALOG_URL !== ''
+        ? { homeBlocks: groupConfig.homeBlocks, catalogUrl: FACTLOG_CATALOG_URL }
+        : {}),
       ...(groupConfig.writeScopes !== undefined ? { writeScopes: groupConfig.writeScopes } : {}),
     };
     fs.writeFileSync(path.join(sessionDirPath, 'factlog.json'), `${JSON.stringify(identity, null, 2)}\n`, {

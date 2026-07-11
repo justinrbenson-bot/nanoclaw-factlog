@@ -48,6 +48,35 @@ export async function fetchBrief(cfg: FactlogRunConfig, budgetTokens = 500): Pro
   }
 }
 
+/**
+ * GET {catalogUrl}/brief?block=… — the block-scoped brief from the
+ * factlog-catalog serve endpoint (a separate read-model; the daemon's /brief
+ * only knows scopes). Reached over the host gateway even on socket transport,
+ * so it always goes through the network client, never the daemon socket. Null
+ * when catalog/blocks are absent, unreachable, or the endpoint errors — the
+ * scope brief still stands on its own.
+ */
+export async function fetchBlockBrief(cfg: FactlogRunConfig, budgetTokens = 500): Promise<string | null> {
+  if (cfg.catalogUrl === undefined || (cfg.homeBlocks ?? []).length === 0) return null;
+  const params = new URLSearchParams({ budget: String(budgetTokens), format: 'prompt' });
+  for (const block of cfg.homeBlocks ?? []) params.append('block', block);
+  try {
+    // Same bearer token as the daemon; the catalog ignores it (read-only,
+    // reachability is the grant). Sending it keeps one auth path.
+    const res = await fetch(`${cfg.catalogUrl}/brief?${params}`, {
+      headers: { authorization: `Bearer ${cfg.token}` },
+    });
+    if (!res.ok) {
+      log(`block brief fetch failed: HTTP ${res.status}`);
+      return null;
+    }
+    return await res.text();
+  } catch (err) {
+    log(`block brief fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
 export interface HookDecision {
   decision?: 'block';
   reason?: string;

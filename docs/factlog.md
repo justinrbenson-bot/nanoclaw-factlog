@@ -63,6 +63,7 @@ delivery outranks coordination.
    # FACTLOG_TRANSPORT=socket|host-gateway   # default: socket on Linux, host-gateway on macOS
    # FACTLOG_SOCKET=<workspace>/.factlog/factlog.sock
    # FACTLOG_HOST_URL=http://host.docker.internal:4711
+   # FACTLOG_CATALOG_URL=http://host.docker.internal:4722   # factlog-catalog serve (block briefs)
    ```
 
    macOS note: Docker Desktop cannot forward host unix sockets into the VM,
@@ -75,6 +76,7 @@ delivery outranks coordination.
    ```json
    {
      "homeScopes": ["topic://meals/**", "job://grocery-order", "channel://whatsapp/**"],
+     "homeBlocks": ["topic:meals", "jira:PROJ-14"],
      "writeScopes": ["topic://meals/**", "job://**"],
      "origin": "external",
      "sponsor": "justin"
@@ -83,7 +85,41 @@ delivery outranks coordination.
 
    `homeScopes` bound what the agent's brief covers; `writeScopes` bound where
    it may post (enforced daemon-side via the token). Absent file = global
-   brief, unrestricted writes, external origin.
+   brief, unrestricted writes, external origin. `homeBlocks` is optional and
+   adds a **block-scoped brief** on top of the scope brief — see below.
+
+## Block briefs (factlog-catalog)
+
+The daemon's `/brief` selects facts by **scope**. Sometimes an agent's slice of
+the project is better described as a curated *block* — a classified slice that
+can cut across scopes (a Jira epic, a topic cluster). That classification lives
+in the separate [factlog-catalog](https://github.com/justinrbenson-bot/factlog-catalog)
+read-model, deterministically and LLM-free at read time (an offline classifier
+pays the cost once per fact, at ingest). Nanoclaw wires it in:
+
+- Run the catalog serve endpoint on the host, kept fresh from the log:
+
+  ```bash
+  factlog-catalog serve --db ~/factlog-catalog.db --port 4722 \
+    --refresh-cmd "factlog export" --refresh-interval 30
+  ```
+
+  `--refresh-cmd` runs on the interval and pipes `factlog export` NDJSON
+  through the classifier; `POST /ingest` is the push alternative. The catalog
+  never reads factlog's DB — only the NDJSON export — so the two stay decoupled.
+
+- Point nanoclaw at it with `FACTLOG_CATALOG_URL` (default derives port 4722
+  from `FACTLOG_HOST_URL`). It's HTTP-only: even on `socket` transport the
+  container reaches the catalog over the host gateway.
+
+- Declare `homeBlocks` in a group's `factlog.json`. At spawn the host adds the
+  blocks + catalog URL to the run identity; at SessionStart the agent-runner
+  fetches `GET {catalogUrl}/brief?block=…` and injects it under an
+  **`### assigned blocks`** heading, alongside the scope brief. Both fail open
+  independently — an unreachable catalog just drops the block section.
+
+  A group with `homeBlocks` set but no catalog configured is inert (the field
+  is ignored), so declaring blocks before standing up the catalog is safe.
 
 Scope vocabulary (URIs, RFC §3.4): `channel://whatsapp/family`,
 `topic://finances/**`, `job://daily-digest`, `contact://mom`.
@@ -125,9 +161,10 @@ Scope vocabulary (URIs, RFC §3.4): `channel://whatsapp/family`,
 
 | File | Purpose |
 |------|---------|
-| `src/modules/factlog/index.ts` | Host side: enablement, group config, token mint/revoke, run identity file, socket mount |
+| `src/modules/factlog/index.ts` | Host side: enablement, group config (incl. `homeBlocks`), token mint/revoke, run identity file, socket mount |
 | `container/agent-runner/src/factlog/config.ts` | Run identity (`/workspace/factlog.json`) parsing |
-| `container/agent-runner/src/factlog/client.ts` | HTTP client over UDS (Bun `unix:` fetch) or host gateway; brief + hook endpoints |
+| `container/agent-runner/src/factlog/client.ts` | HTTP client over UDS (Bun `unix:` fetch) or host gateway; scope brief, block brief (catalog), hook endpoints |
+| `factlog-catalog` (separate repo) | Block classifier + `serve` endpoint (`GET /brief?block=…`) — the source of block briefs |
 | `container/agent-runner/src/factlog/proxy.ts` | Loopback proxy exposing the daemon's `/mcp` to the provider subprocess |
 | `container/agent-runner/src/factlog/hooks.ts` | SessionStart / PreToolUse / Stop lifecycle hooks |
 

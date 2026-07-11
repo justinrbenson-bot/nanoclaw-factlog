@@ -20,6 +20,10 @@ export interface FactlogRunConfig {
   session: string;
   /** What this agent's brief covers. Absent = the whole log. */
   homeScopes?: string[];
+  /** Catalog blocks for a block-scoped brief; requires catalogUrl. Absent = none. */
+  homeBlocks?: string[];
+  /** factlog-catalog serve base URL — set by the host only when homeBlocks is. */
+  catalogUrl?: string;
   writeScopes?: string[];
 }
 

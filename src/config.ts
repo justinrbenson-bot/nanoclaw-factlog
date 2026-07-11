@@ -22,6 +22,7 @@ const envConfig = readEnvFile([
   'FACTLOG_SOCKET',
   'FACTLOG_TRANSPORT',
   'FACTLOG_HOST_URL',
+  'FACTLOG_CATALOG_URL',
 ]);
 
 /**
@@ -112,3 +113,12 @@ export const FACTLOG_TRANSPORT =
   (os.platform() === 'darwin' ? 'host-gateway' : 'socket');
 export const FACTLOG_HOST_URL =
   process.env.FACTLOG_HOST_URL || envConfig.FACTLOG_HOST_URL || 'http://host.docker.internal:4711';
+// Block-scoped briefs come from the factlog-catalog serve endpoint
+// (`factlog-catalog serve`), a separate read-model over the log — the daemon's
+// /brief only knows scopes. HTTP-only: even on `socket` transport the container
+// reaches it via host-gateway, so this is always a host.docker.internal URL.
+// Empty (the default host portion of FACTLOG_HOST_URL) unless overridden.
+export const FACTLOG_CATALOG_URL =
+  process.env.FACTLOG_CATALOG_URL ||
+  envConfig.FACTLOG_CATALOG_URL ||
+  FACTLOG_HOST_URL.replace(/:\d+(?=\/|$)/, ':4722');
