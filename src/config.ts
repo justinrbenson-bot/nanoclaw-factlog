@@ -119,6 +119,4 @@ export const FACTLOG_HOST_URL =
 // reaches it via host-gateway, so this is always a host.docker.internal URL.
 // Empty (the default host portion of FACTLOG_HOST_URL) unless overridden.
 export const FACTLOG_CATALOG_URL =
-  process.env.FACTLOG_CATALOG_URL ||
-  envConfig.FACTLOG_CATALOG_URL ||
-  FACTLOG_HOST_URL.replace(/:\d+(?=\/|$)/, ':4722');
+  process.env.FACTLOG_CATALOG_URL || envConfig.FACTLOG_CATALOG_URL || FACTLOG_HOST_URL.replace(/:\d+(?=\/|$)/, ':4722');

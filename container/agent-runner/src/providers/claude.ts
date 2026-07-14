@@ -471,7 +471,18 @@ export class ClaudeProvider implements AgentProvider {
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'rate_limit_event') {
-          yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
+          // `rate_limit_event` fires whenever claude.ai subscription rate-limit
+          // info *changes*, including the benign `status: 'allowed'` case — it
+          // is telemetry, not an error. Only `rejected` is an actual quota
+          // rejection; surfacing every event as an error spams the log with a
+          // false `quota` alarm on essentially every turn. (Raw API keys emit
+          // no such event, so this only matters for OAuth-subscription creds.)
+          const info = (message as { rate_limit_info?: { status?: string } }).rate_limit_info;
+          if (info?.status === 'rejected') {
+            yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
+          } else if (info?.status === 'allowed_warning') {
+            log(`Rate limit approaching (status: allowed_warning)`);
+          }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
