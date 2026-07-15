@@ -18,6 +18,51 @@
 
 ---
 
+> ## This fork adds [factlog](https://github.com/justinrbenson-bot/factlog) — shared memory for isolated agents
+>
+> NanoClaw's isolation is the whole point: every agent in its own container, walled off
+> from every other one. The cost, in upstream's own framing, is amnesia and fragmentation
+> — agents can't share what they learn, so a fleet re-derives the same context forever and
+> makes contradictory decisions in parallel.
+>
+> This fork adds the missing middle. A host-side append-only fact log; containers reach it
+> over a bind-mounted unix socket with a per-run token minted at spawn. **Agents never talk
+> to each other.** They read and write small typed facts — decisions, invariants,
+> questions, findings, claims — through one narrow, explicitly granted channel. Isolation
+> stays intact, coordination becomes possible, and every cross-agent influence is a logged,
+> attributable event you can inspect.
+>
+> - **SessionStart** injects a deterministic, budgeted brief of the agent's scopes — the
+>   current invariants, decisions, open questions, and last handoff — instead of a
+>   markdown file that grows forever.
+> - **Supersession is authored, not inferred.** When a decision dies, an agent writes the
+>   edge (`retracts` / `falsifies` / `demotes`) at write time, so the read path compiles
+>   the brief deterministically with no LLM in it.
+> - **External-origin runs are tainted at the source**, and tainted decisions land
+>   `pending` until a human approves them — so a compromised agent's conclusions can't
+>   silently become durable truth the rest of the fleet acts on.
+>
+> Hooks fail open when the daemon is unreachable: message delivery outranks coordination.
+> This is a coordination layer, not a security boundary — the container is the boundary.
+>
+> **Try it** — note this clones *this fork*, not upstream (the Quick Start below is
+> upstream's and won't include factlog):
+>
+> ```bash
+> git clone https://github.com/justinrbenson-bot/nanoclaw-factlog.git && cd nanoclaw-factlog
+> npm i -g factlog
+> mkdir -p ~/factlog-ws && cd ~/factlog-ws && factlog init && factlog serve   # :4820 web, :4711 API
+> # then set FACTLOG_WORKSPACE=~/factlog-ws in the fork's .env and run bash nanoclaw.sh
+> ```
+>
+> Setup, architecture, and the trust model: **[docs/factlog.md](docs/factlog.md)**.
+>
+> factlog itself lives at **[justinrbenson-bot/factlog](https://github.com/justinrbenson-bot/factlog)**
+> — Apache-2.0, on npm as `factlog`. Everything below this line is upstream NanoClaw's
+> README, unchanged.
+
+---
+
 ## Why I Built NanoClaw
 
 [OpenClaw](https://github.com/openclaw/openclaw) is an impressive project, but I wouldn't have been able to sleep if I had given complex software I didn't understand full access to my life. OpenClaw has nearly half a million lines of code, 53 config files, and 70+ dependencies. Its security is at the application level (allowlists, pairing codes) rather than true OS-level isolation. Everything runs in one Node process with shared memory.
